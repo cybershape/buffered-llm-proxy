@@ -1,0 +1,19 @@
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"我"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"需要"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"先"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"分析"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"这个"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"问题。"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"content":"分析完毕。"}}]}
+
+data: {"id":"chatcmpl-reason-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

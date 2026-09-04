@@ -1,0 +1,19 @@
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"Step 1: "}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"reasoning_content":"Think deeply. "}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"content":"I will "}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"content":"check the weather. "}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_w1","type":"function","function":{"name":"weather","arguments":"{\"loc\":"}}]}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{"content":"Please wait."}}]}
+
+data: {"id":"chatcmpl-complex-1","object":"chat.completion.chunk","created":1700000000,"model":"deepseek-r1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

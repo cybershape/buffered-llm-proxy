@@ -1,0 +1,17 @@
+# Binaries
+buffered-proxy
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
