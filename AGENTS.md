@@ -1,32 +1,33 @@
 # AGENTS.md
 
-## 项目说明
+## Project Overview
 
-本项目为高性能、基于语义分段聚合的 OpenAI 兼容 Chat Completions 流式聚合代理（Buffered Streaming Proxy），采用 Go 编写。
+This project is a high-performance, semantic-segment-coalescing streaming aggregation proxy for OpenAI-compatible Chat Completions, written in Go.
 
-## 架构与核心原则
+## Architecture & Core Principles
 
-1. **并发解耦模型**：
-   - Upstream Reader 与 Downstream Writer 完全并发解耦。
-   - Reader 持续以网络最快速度读取上游 SSE 数据，解析为语义分段（Semantic Segments）写入有界缓冲区。
-   - Writer 由下游网络完成驱动（Downstream-completion-driven），每次写入完毕后通过原子 Swap 提取当前累积的 snapshot 并下发。
-   - 下游越慢，批次自动越大；下游越快，输出越接近实时。
+1. **Decoupled Concurrency Model**:
+   - The Upstream Reader and Downstream Writer are fully decoupled concurrently.
+   - The Reader continuously reads upstream SSE chunks at maximum network ingestion speed, parses them into semantic segments, and buffers them in bounded memory.
+   - The Writer is downstream-completion-driven: after each network write and flush finishes, it atomically swaps the currently accumulated snapshot and flushes it to the client.
+   - The slower the downstream client/network, the larger the batch size automatically becomes; the faster the downstream, the closer output latency is to real-time.
 
-2. **严格语义顺序与 Barrier**：
-   - 保持 upstream 语义事件顺序，严禁 cross-segment 乱序。
-   - Reasoning -> Content 为 Barrier，禁止跨边界混合。
-   - Content -> Tool Call 为 Barrier。
-   - Tool Call -> Content 为 Barrier。
-   - `finish_reason`、`usage`、`[DONE]`、`error` 为控制 Barrier，保证之前数据全部下发后再发出。
+2. **Strict Semantic Ordering & Barrier**:
+   - Preserves upstream semantic event ordering without cross-segment reordering.
+   - Reasoning -> Content forms a barrier (never mixed in a single delta).
+   - Content -> Tool Call forms a barrier.
+   - Tool Call -> Content forms a barrier.
+   - `finish_reason`, `usage`, `[DONE]`, and `error` form control barriers, ensuring all preceding buffered tokens are flushed before emission.
+   - Repeated `role` deltas for the same choice are ignored and never form a barrier, preventing unnecessary segmentation.
 
-3. **协议与格式兼容**：
-   - Reasoning 字段保留原始名称（如 `reasoning_content`、`reasoning` 等），不自行转换 schema。
-   - Tool Call arguments 采用逐字节拼接，严禁中途 parse/stringify JSON。
-   - 保留公共 Metadata（id、model、system_fingerprint 等），透传未知扩展字段。
-   - `/v1/models` 以及 `POST /v1/chat/completions`（`stream=false`）请求全透明透传。
+3. **Protocol & Schema Compatibility**:
+   - Preserves original reasoning field names (such as `reasoning_content`, `reasoning`, `reasoning_text`, `thought`), without changing schema.
+   - Tool call arguments are concatenated byte-by-byte as raw strings without parsing or stringifying partial JSON.
+   - Preserves common response metadata (`id`, `model`, `system_fingerprint`, etc.) and passes through unrecognized custom extensions.
+   - Transparently passes through `GET /v1/models` and non-streaming `POST /v1/chat/completions` (`stream=false`).
 
-## 工程规范
+## Engineering Guidelines
 
-- 代码风格遵循 Go 官方标准（`gofmt`），无冗余注释。
-- 提交前必须通过 `-race` 竞态检测：`go test -race ./...`。
-- 修改聚合规则时需同步维护 `fixtures/` 与 `tests/` 测试用例。
+- Code style follows official Go standards (`gofmt`), with no redundant comments.
+- Must pass race detection before commit: `go test -race ./...`.
+- Update corresponding `fixtures/` and `tests/` test cases when modifying aggregation rules.

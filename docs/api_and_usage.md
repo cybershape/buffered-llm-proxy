@@ -1,13 +1,13 @@
-# 接口指南与运行配置
+# API Reference & Usage Guide
 
-## 1. 构建与运行
+## 1. Build & Run
 
-### 构建二进制
+### Build Binary
 ```bash
 go build -o buffered-proxy ./cmd/proxy
 ```
 
-### 启动代理服务
+### Start Proxy Service
 ```bash
 ./buffered-proxy \
   -host 0.0.0.0 \
@@ -19,31 +19,31 @@ go build -o buffered-proxy ./cmd/proxy
 
 ---
 
-## 2. 命令行参数详解
+## 2. Command-Line Options
 
-| 参数名 | 默认值 | 说明 |
+| Flag | Default | Description |
 | :--- | :--- | :--- |
-| `-host` | `0.0.0.0` | 代理服务绑定的监听 IP / Host |
-| `-port` | `8080` | 代理服务监听端口 |
-| `-upstream` | `http://127.0.0.1:8000` | 上游 AI Provider 或 CLIProxyAPI 地址 |
-| `-max-buffer-mb` | `32` | 单请求内存 Buffer 高水位阈值（MB），超过触发反压暂停 Upstream Reader |
-| `-low-water-mb` | `24` | 单请求内存 Buffer 低水位阈值（MB），缓冲区回落至此值以下恢复 Upstream Reader |
-| `-min-coalesce-ms` | `0` | 可选微延迟汇聚等待时间（毫秒），默认为 0（纯下游完成驱动） |
-| `-enable-metrics` | `true` | 是否开放 `/metrics` 监控端点 |
+| `-host` | `0.0.0.0` | IP address / host to bind the proxy server |
+| `-port` | `8080` | Port to listen on |
+| `-upstream` | `http://127.0.0.1:8000` | Target AI provider or CLIProxyAPI URL |
+| `-max-buffer-mb` | `32` | Maximum per-stream buffer memory limit (high watermark in MB), triggers upstream backpressure when reached |
+| `-low-water-mb` | `24` | Buffer low watermark threshold (MB) to resume upstream reader |
+| `-min-coalesce-ms` | `0` | Optional cooperative coalesce delay in milliseconds (default: 0, purely downstream-driven) |
+| `-enable-metrics` | `true` | Enable `/metrics` monitoring endpoint |
 
 ---
 
-## 3. 支持端点与路由行为
+## 3. Supported Endpoints & Routing
 
-### 3.1 `POST /v1/chat/completions` (流式聚合)
-当请求体包含 `"stream": true` 时触发流式语义聚合机制：
-- 自动建立上游 Reader 协程与下游 Writer 写入流程。
-- Reasoning（思维链）、Content（正文增量）、Tool Calls（工具调用参数）按语义规则安全聚合。
-- 重复 `role` 自动忽略，不构成 barrier。
-- 顺序与边界（Reasoning -> Content -> Tool Calls -> Content -> Finish）严格保序。
-- 上游输出错误或异常非 200 响应时，自动透传对应状态码与错误内容。
+### 3.1 `POST /v1/chat/completions` (Streaming Aggregation)
+Triggered when request payload specifies `"stream": true`:
+- Spawns independent upstream reader and downstream writer routines.
+- Coalesces reasoning tokens, content deltas, and tool call argument fragments safely.
+- Ignores repeated roles without creating barriers.
+- Enforces strict semantic order (`Reasoning -> Content -> Tool Calls -> Content -> Finish`).
+- Automatically passes through upstream errors or non-200 HTTP statuses.
 
-#### 示例请求
+#### Example Request
 ```bash
 curl -N -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -51,21 +51,21 @@ curl -N -X POST http://localhost:8080/v1/chat/completions \
   -d '{
     "model": "deepseek-r1",
     "stream": true,
-    "messages": [{"role": "user", "content": "你好"}]
+    "messages": [{"role": "user", "content": "Hello"}]
   }'
 ```
 
 ---
 
-### 3.2 `POST /v1/chat/completions` (`stream: false` 透明透传)
-当请求体未设置 `stream` 或 `"stream": false` 时，执行无损反向代理透明透传。
+### 3.2 `POST /v1/chat/completions` (Non-streaming Transparent Pass-through)
+When `"stream": false` or omitted, requests are transparently reverse-proxied to upstream without alteration.
 
 ---
 
-### 3.3 `GET /v1/models` (透明透传)
-直接代理上游模型列表接口，保留原始 Headers 及 JSON 响应体。
+### 3.3 `GET /v1/models` (Transparent Pass-through)
+Passes through model list requests directly, preserving upstream headers and response body.
 
-#### 示例请求
+#### Example Request
 ```bash
 curl http://localhost:8080/v1/models \
   -H "Authorization: Bearer $API_KEY"
@@ -73,8 +73,8 @@ curl http://localhost:8080/v1/models \
 
 ---
 
-### 3.4 `GET /metrics` (监控与统计)
-返回代理服务自启动以来的累积统计与聚合比率指标：
+### 3.4 `GET /metrics` (Monitoring & Metrics)
+Exposes aggregated throughput and coalescing statistics since server start:
 
 ```json
 {
