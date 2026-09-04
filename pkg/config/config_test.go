@@ -23,6 +23,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if cfg.Address() != "0.0.0.0:8080" {
 		t.Fatalf("expected address 0.0.0.0:8080, got %s", cfg.Address())
 	}
+	if !cfg.EnableCompression {
+		t.Fatalf("expected compression enabled by default")
+	}
 	bufCfg := cfg.BufferConfig()
 	if bufCfg.HighWatermark != 32*1024*1024 {
 		t.Fatalf("expected 32MB high watermark, got %d", bufCfg.HighWatermark)
@@ -40,10 +43,15 @@ func TestParseFlagsCustom(t *testing.T) {
 		"-max-buffer-mb", "64",
 		"-low-water-mb", "48",
 		"-min-coalesce-ms", "5",
+		"-enable-compression=false",
 	}
 	cfg, err := ParseFlags(args)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if cfg.EnableCompression {
+		t.Fatalf("expected compression disabled")
 	}
 
 	if cfg.Host != "127.0.0.1" || cfg.Port != 9090 {

@@ -13,14 +13,16 @@ import (
 	"time"
 
 	"buffered-proxy/pkg/aggregator"
+	"buffered-proxy/pkg/compress"
 	"buffered-proxy/pkg/metrics"
 )
 
 type ServerConfig struct {
-	UpstreamURL     *url.URL
-	BufferConfig    aggregator.BufferConfig
-	HTTPClient      *http.Client
-	AllowMetricsAPI bool
+	UpstreamURL        *url.URL
+	BufferConfig       aggregator.BufferConfig
+	HTTPClient         *http.Client
+	AllowMetricsAPI    bool
+	DisableCompression bool
 }
 
 type ProxyServer struct {
@@ -59,7 +61,13 @@ func (s *ProxyServer) TotalMetrics() *metrics.StreamMetrics {
 }
 
 func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.AllowMetricsAPI && (r.URL.Path == "/metrics" || r.URL.Path == "/debug/metrics") {
+	if !s.cfg.DisableCompression {
+		cw, cleanup := compress.WrapResponseWriter(w, r, s.totalMetrics)
+		defer cleanup()
+		w = cw
+	}
+
+	if s.cfg.AllowMetricsAPI && r.URL.Path == "/metrics" {
 		s.handleMetrics(w, r)
 		return
 	}
@@ -97,9 +105,13 @@ func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		"tool_fragments_in":          s.totalMetrics.ToolArgumentFragmentsIn,
 		"tool_events_out":            s.totalMetrics.ToolEventsOut,
 		"tool_coalescing_ratio":      s.totalMetrics.ToolCoalescingRatio(),
-		"upstream_bytes":             s.totalMetrics.UpstreamBytes,
-		"downstream_bytes":           s.totalMetrics.DownstreamBytes,
-		"pending_bytes_max":          s.totalMetrics.PendingBytesMax,
+		"upstream_bytes":                 s.totalMetrics.UpstreamBytes,
+		"downstream_bytes":               s.totalMetrics.DownstreamBytes,
+		"compression_uncompressed_bytes": s.totalMetrics.CompressionUncompressedBytes,
+		"compression_compressed_bytes":   s.totalMetrics.CompressionCompressedBytes,
+		"compression_ratio":              s.totalMetrics.CompressionRatio(),
+		"compression_savings_ratio":      s.totalMetrics.CompressionSavingsRatio(),
+		"pending_bytes_max":              s.totalMetrics.PendingBytesMax,
 		"reader_pause_count":         s.totalMetrics.ReaderPauseCount,
 		"reader_pause_duration_ns":   s.totalMetrics.ReaderPauseDurationNs,
 		"downstream_write_ns":        s.totalMetrics.DownstreamWriteNs,
@@ -139,6 +151,7 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	copyHeaders(req.Header, r.Header)
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := s.client.Do(req)
 	if err != nil {

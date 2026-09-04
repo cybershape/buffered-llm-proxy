@@ -15,9 +15,11 @@ type StreamMetrics struct {
 	ContentEventsOut        int64
 	ToolArgumentFragmentsIn int64
 	ToolEventsOut           int64
-	UpstreamBytes           int64
-	DownstreamBytes         int64
-	PendingBytesCurrent     int64
+	UpstreamBytes                int64
+	DownstreamBytes              int64
+	CompressionUncompressedBytes int64
+	CompressionCompressedBytes   int64
+	PendingBytesCurrent          int64
 	PendingBytesMax         int64
 	ReaderPauseCount        int64
 	ReaderPauseDurationNs   int64
@@ -122,6 +124,29 @@ func (m *StreamMetrics) ToolCoalescingRatio() float64 {
 	return float64(in) / float64(out)
 }
 
+func (m *StreamMetrics) AddCompressionBytes(uncompressed, compressed int64) {
+	atomic.AddInt64(&m.CompressionUncompressedBytes, uncompressed)
+	atomic.AddInt64(&m.CompressionCompressedBytes, compressed)
+}
+
+func (m *StreamMetrics) CompressionRatio() float64 {
+	in := atomic.LoadInt64(&m.CompressionUncompressedBytes)
+	out := atomic.LoadInt64(&m.CompressionCompressedBytes)
+	if out == 0 {
+		return 0
+	}
+	return float64(in) / float64(out)
+}
+
+func (m *StreamMetrics) CompressionSavingsRatio() float64 {
+	in := atomic.LoadInt64(&m.CompressionUncompressedBytes)
+	out := atomic.LoadInt64(&m.CompressionCompressedBytes)
+	if in == 0 {
+		return 0
+	}
+	return float64(in-out) / float64(in)
+}
+
 func (m *StreamMetrics) Summary() string {
 	return fmt.Sprintf(
 		"SSE Events: [Upstream: %d, Downstream: %d, Ratio: %.2f:1], "+
@@ -129,6 +154,7 @@ func (m *StreamMetrics) Summary() string {
 			"Content: [In: %d, Out: %d, Ratio: %.2f:1], "+
 			"Tool: [In: %d, Out: %d, Ratio: %.2f:1], "+
 			"Bytes: [Upstream: %d, Downstream: %d], "+
+			"Compression: [Uncompressed: %d, Compressed: %d, Ratio: %.2f:1, Savings: %.1f%%], "+
 			"Buffer: [Max: %d bytes], "+
 			"Reader Pauses: [Count: %d, Total: %v], "+
 			"Write Duration Total: %v",
@@ -146,6 +172,10 @@ func (m *StreamMetrics) Summary() string {
 		m.ToolCoalescingRatio(),
 		atomic.LoadInt64(&m.UpstreamBytes),
 		atomic.LoadInt64(&m.DownstreamBytes),
+		atomic.LoadInt64(&m.CompressionUncompressedBytes),
+		atomic.LoadInt64(&m.CompressionCompressedBytes),
+		m.CompressionRatio(),
+		m.CompressionSavingsRatio()*100,
 		atomic.LoadInt64(&m.PendingBytesMax),
 		atomic.LoadInt64(&m.ReaderPauseCount),
 		time.Duration(atomic.LoadInt64(&m.ReaderPauseDurationNs)),

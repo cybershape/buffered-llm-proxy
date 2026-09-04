@@ -15,6 +15,8 @@ import (
 	"buffered-proxy/pkg/aggregator"
 	"buffered-proxy/pkg/proxy"
 	"buffered-proxy/pkg/sse"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestEndToEndFullFlow(t *testing.T) {
@@ -180,5 +182,86 @@ func TestUnknownEventPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(outStr, "custom_data_payload") {
 		t.Fatalf("expected payload to be preserved, got: %s", outStr)
+	}
+}
+
+func TestEndToEndZstdStreamingCompression(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		chunks := []string{
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"chunk-1-\"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"chunk-2-\"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, c := range chunks {
+			_, _ = w.Write([]byte(c))
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	uURL, err := url.Parse(upstreamServer.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url failed: %v", err)
+	}
+
+	proxySrv := proxy.NewProxyServer(proxy.ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	proxyTestServer := httptest.NewServer(proxySrv)
+	defer proxyTestServer.Close()
+
+	req, err := http.NewRequest(http.MethodPost, proxyTestServer.URL+"/v1/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("create request failed: %v", err)
+	}
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Encoding") != "zstd" {
+		t.Fatalf("expected Content-Encoding zstd, got %s", resp.Header.Get("Content-Encoding"))
+	}
+
+	zstdReader, err := zstd.NewReader(resp.Body)
+	if err != nil {
+		t.Fatalf("init zstd reader failed: %v", err)
+	}
+	defer zstdReader.Close()
+
+	r := sse.NewReader(zstdReader)
+	var eventsReceived int
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read event failed: %v", err)
+		}
+		if string(ev.Data) == "[DONE]" {
+			break
+		}
+		eventsReceived++
+	}
+
+	if eventsReceived == 0 {
+		t.Fatalf("expected to receive events over zstd compressed stream")
 	}
 }

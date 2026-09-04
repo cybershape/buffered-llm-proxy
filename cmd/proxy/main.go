@@ -25,9 +25,10 @@ func main() {
 	}
 
 	proxySrv := proxy.NewProxyServer(proxy.ServerConfig{
-		UpstreamURL:     cfg.ParsedUpstream,
-		BufferConfig:    cfg.BufferConfig(),
-		AllowMetricsAPI: cfg.EnableMetrics,
+		UpstreamURL:        cfg.ParsedUpstream,
+		BufferConfig:       cfg.BufferConfig(),
+		AllowMetricsAPI:    cfg.EnableMetrics,
+		DisableCompression: !cfg.EnableCompression,
 	})
 
 	server := &http.Server{

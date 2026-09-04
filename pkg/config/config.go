@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	Host           string
-	Port           int
-	Upstream       string
-	MaxBufferMB    int
-	LowWaterMB     int
-	MinCoalesceMs  int
-	EnableMetrics  bool
-	ParsedUpstream *url.URL
+	Host              string
+	Port              int
+	Upstream          string
+	MaxBufferMB       int
+	LowWaterMB        int
+	MinCoalesceMs     int
+	EnableMetrics     bool
+	EnableCompression bool
+	ParsedUpstream    *url.URL
 }
 
 func ParseFlags(args []string) (*Config, error) {
@@ -30,7 +31,8 @@ func ParseFlags(args []string) (*Config, error) {
 	fs.IntVar(&cfg.MaxBufferMB, "max-buffer-mb", 32, "max buffer size per stream in MB (high watermark)")
 	fs.IntVar(&cfg.LowWaterMB, "low-water-mb", 24, "low watermark buffer size per stream in MB")
 	fs.IntVar(&cfg.MinCoalesceMs, "min-coalesce-ms", 0, "cooperative coalesce delay in milliseconds")
-	fs.BoolVar(&cfg.EnableMetrics, "enable-metrics", true, "enable /metrics and /debug/metrics endpoints")
+	fs.BoolVar(&cfg.EnableMetrics, "enable-metrics", true, "enable /metrics endpoint")
+	fs.BoolVar(&cfg.EnableCompression, "enable-compression", true, "enable response compression (gzip, zstd)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err

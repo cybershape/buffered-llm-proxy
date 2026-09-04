@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 
 	"buffered-proxy/pkg/aggregator"
 	"buffered-proxy/pkg/sse"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestProxyModelsTransparent(t *testing.T) {
@@ -188,5 +191,254 @@ func TestProxyChatStreamTrueAggregated(t *testing.T) {
 	}
 	if concatenatedContent != "ABC" {
 		t.Fatalf("expected concatenated content 'ABC', got %q", concatenatedContent)
+	}
+}
+
+func TestProxyModelsCompressionGzip(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"}]}`))
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected Content-Encoding gzip, got %s", rec.Header().Get("Content-Encoding"))
+	}
+
+	gzReader, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to init gzip reader: %v", err)
+	}
+	defer gzReader.Close()
+
+	body, _ := io.ReadAll(gzReader)
+	if !strings.Contains(string(body), "gpt-4o") {
+		t.Fatalf("expected gpt-4o in decompressed body, got: %s", string(body))
+	}
+}
+
+func TestProxyModelsCompressionZstd(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"}]}`))
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "zstd" {
+		t.Fatalf("expected Content-Encoding zstd, got %s", rec.Header().Get("Content-Encoding"))
+	}
+
+	zstdReader, err := zstd.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to init zstd reader: %v", err)
+	}
+	defer zstdReader.Close()
+
+	body, _ := io.ReadAll(zstdReader)
+	if !strings.Contains(string(body), "gpt-4o") {
+		t.Fatalf("expected gpt-4o in decompressed body, got: %s", string(body))
+	}
+}
+
+func TestProxyChatStreamCompressionZstd(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		chunks := []string{
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"World!\"}}]}\n\n",
+			"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, chunk := range chunks {
+			_, _ = w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Accept-Encoding", "zstd")
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "zstd" {
+		t.Fatalf("expected Content-Encoding zstd, got %s", rec.Header().Get("Content-Encoding"))
+	}
+
+	zstdReader, err := zstd.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to init zstd reader: %v", err)
+	}
+	defer zstdReader.Close()
+
+	r := sse.NewReader(zstdReader)
+	var contents []string
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read event err: %v", err)
+		}
+		if string(ev.Data) == "[DONE]" {
+			break
+		}
+		var chunkMap map[string]interface{}
+		clean := strings.TrimPrefix(string(ev.Data), "data: ")
+		if json.Unmarshal([]byte(clean), &chunkMap) == nil {
+			if choices, ok := chunkMap["choices"].([]interface{}); ok && len(choices) > 0 {
+				first := choices[0].(map[string]interface{})
+				if delta, ok := first["delta"].(map[string]interface{}); ok {
+					if txt, ok := delta["content"].(string); ok {
+						contents = append(contents, txt)
+					}
+				}
+			}
+		}
+	}
+
+	joined := strings.Join(contents, "")
+	if joined != "Hello World!" {
+		t.Fatalf("expected 'Hello World!', got %q", joined)
+	}
+}
+
+func TestProxyMetricsCompression(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:8000")
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected Content-Encoding gzip, got %s", rec.Header().Get("Content-Encoding"))
+	}
+
+	gzReader, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to init gzip reader: %v", err)
+	}
+	defer gzReader.Close()
+
+	body, _ := io.ReadAll(gzReader)
+	var m map[string]interface{}
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatalf("failed to parse decompressed metrics json: %v", err)
+	}
+	if _, ok := m["downstream_sse_events"]; !ok {
+		t.Fatalf("missing downstream_sse_events in metrics")
+	}
+	if _, ok := m["compression_ratio"]; !ok {
+		t.Fatalf("missing compression_ratio in metrics")
+	}
+	if _, ok := m["compression_savings_ratio"]; !ok {
+		t.Fatalf("missing compression_savings_ratio in metrics")
+	}
+	if _, ok := m["compression_uncompressed_bytes"]; !ok {
+		t.Fatalf("missing compression_uncompressed_bytes in metrics")
+	}
+	if _, ok := m["compression_compressed_bytes"]; !ok {
+		t.Fatalf("missing compression_compressed_bytes in metrics")
+	}
+}
+
+func TestProxyDebugMetricsNotFound(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:8000")
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/debug/metrics", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for /debug/metrics, got %d", rec.Code)
+	}
+}
+
+func TestProxyDisableCompression(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-4o"}]}`))
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Accept-Encoding", "zstd, gzip")
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("expected no Content-Encoding when disabled, got %s", rec.Header().Get("Content-Encoding"))
+	}
+	if !strings.Contains(rec.Body.String(), "gpt-4o") {
+		t.Fatalf("expected plaintext gpt-4o, got %s", rec.Body.String())
 	}
 }
