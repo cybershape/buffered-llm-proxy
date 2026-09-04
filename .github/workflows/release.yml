@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Run tests
+        run: go test -race -v ./...
+
+      - name: Build Linux Binaries
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          mkdir -p dist
+
+          # Linux amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/buffered-proxy-linux-amd64 ./cmd/proxy
+          tar -czvf "dist/buffered-proxy-${VERSION}-linux-amd64.tar.gz" -C dist buffered-proxy-linux-amd64
+
+          # Linux arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/buffered-proxy-linux-arm64 ./cmd/proxy
+          tar -czvf "dist/buffered-proxy-${VERSION}-linux-arm64.tar.gz" -C dist buffered-proxy-linux-arm64
+
+          # Generate checksums
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
