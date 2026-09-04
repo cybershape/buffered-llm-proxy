@@ -38,7 +38,20 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 	buf := NewPendingBuffer(p.cfg, p.metrics)
 
 	readerCtx, cancelReader := context.WithCancel(ctx)
-	defer cancelReader()
+	defer func() {
+		cancelReader()
+		buf.Close(readerCtx.Err())
+	}()
+
+	stopMonitor := make(chan struct{})
+	defer close(stopMonitor)
+	go func() {
+		select {
+		case <-readerCtx.Done():
+			buf.Close(readerCtx.Err())
+		case <-stopMonitor:
+		}
+	}()
 
 	readerErrCh := make(chan error, 1)
 

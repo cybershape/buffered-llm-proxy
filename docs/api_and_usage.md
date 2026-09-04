@@ -73,23 +73,7 @@ curl http://localhost:8080/v1/models \
 
 ---
 
-### 3.4 `POST /v1/completions` (透明透传)
-用于传统补全接口的无损透明代理。
-
-#### 示例请求
-```bash
-curl -X POST http://localhost:8080/v1/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_KEY" \
-  -d '{
-    "model": "gpt-3.5-turbo-instruct",
-    "prompt": "Hello"
-  }'
-```
-
----
-
-### 3.5 `GET /metrics` (监控与统计)
+### 3.4 `GET /metrics` (监控与统计)
 返回代理服务自启动以来的累积统计与聚合比率指标：
 
 ```json

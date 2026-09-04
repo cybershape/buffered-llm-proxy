@@ -97,3 +97,34 @@ func TestPendingBufferHighWatermarkBackpressure(t *testing.T) {
 		t.Fatalf("expected reader pause count > 0, got %d", m.ReaderPauseCount)
 	}
 }
+
+func TestPendingBufferHighWatermarkContextCancel(t *testing.T) {
+	m := &metrics.StreamMetrics{}
+	cfg := BufferConfig{
+		HighWatermark: 100,
+		LowWatermark:  50,
+	}
+	pb := NewPendingBuffer(cfg, m)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	_ = pb.Append(cancelCtx, &semantic.ContentSegment{ChoiceIndex: 0, Text: string(make([]byte, 120))})
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := pb.Append(cancelCtx, &semantic.ContentSegment{ChoiceIndex: 0, Text: string(make([]byte, 50))})
+		errCh <- err
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	pb.Close(cancelCtx.Err())
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("expected error on cancelled context append, got nil")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("Append remained hung after context cancellation")
+	}
+}

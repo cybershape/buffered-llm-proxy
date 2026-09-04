@@ -23,7 +23,7 @@
    - Reasoning 字段保留原始名称（如 `reasoning_content`、`reasoning` 等），不自行转换 schema。
    - Tool Call arguments 采用逐字节拼接，严禁中途 parse/stringify JSON。
    - 保留公共 Metadata（id、model、system_fingerprint 等），透传未知扩展字段。
-   - `/v1/models`、`POST /v1/completions` 以及 `stream=false` 请求全透明透传。
+   - `/v1/models` 以及 `POST /v1/chat/completions`（`stream=false`）请求全透明透传。
 
 ## 工程规范
 

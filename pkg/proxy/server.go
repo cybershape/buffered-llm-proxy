@@ -64,12 +64,22 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == http.MethodPost && strings.TrimSuffix(r.URL.Path, "/") == "/v1/chat/completions" {
-		s.handleChatCompletions(w, r)
+	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
+	if cleanPath == "/v1/chat/completions" {
+		if r.Method == http.MethodPost {
+			s.handleChatCompletions(w, r)
+			return
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	s.transparentProxy(w, r, nil)
+	if cleanPath == "/v1/models" && r.Method == http.MethodGet {
+		s.transparentProxy(w, r, nil)
+		return
+	}
+
+	http.NotFound(w, r)
 }
 
 func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {

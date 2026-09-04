@@ -46,20 +46,8 @@ func TestProxyModelsTransparent(t *testing.T) {
 	}
 }
 
-func TestProxyCompletionsTransparent(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/completions" {
-			t.Errorf("unexpected upstream req: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"cmpl-1","choices":[{"text":"hello completions"}]}`))
-	}))
-	defer upstream.Close()
-
-	uURL, _ := url.Parse(upstream.URL)
+func TestProxyCompletionsEndpointNotSupported(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:8000")
 	proxySrv := NewProxyServer(ServerConfig{
 		UpstreamURL:  uURL,
 		BufferConfig: aggregator.DefaultBufferConfig(),
@@ -69,12 +57,8 @@ func TestProxyCompletionsTransparent(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"prompt":"hi"}`))
 	proxySrv.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "hello completions") {
-		t.Fatalf("expected completions in body, got: %s", body)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404 for /v1/completions, got %d", rec.Code)
 	}
 }
 

@@ -24,10 +24,6 @@ func TestEndToEndFullFlow(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"mock-model-v1"}]}`))
-		case "/v1/completions":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"id":"cmpl-001","choices":[{"text":"completion result"}]}`))
 		case "/v1/chat/completions":
 			bodyBytes, _ := io.ReadAll(r.Body)
 			var reqMap map[string]interface{}
@@ -91,16 +87,6 @@ func TestEndToEndFullFlow(t *testing.T) {
 	_ = respModels.Body.Close()
 	if !strings.Contains(string(bodyModels), "mock-model-v1") {
 		t.Fatalf("unexpected models body: %s", string(bodyModels))
-	}
-
-	respCmpl, err := client.Post(proxyTestServer.URL+"/v1/completions", "application/json", strings.NewReader(`{"prompt":"test"}`))
-	if err != nil || respCmpl.StatusCode != http.StatusOK {
-		t.Fatalf("failed completions request: %v", err)
-	}
-	bodyCmpl, _ := io.ReadAll(respCmpl.Body)
-	_ = respCmpl.Body.Close()
-	if !strings.Contains(string(bodyCmpl), "completion result") {
-		t.Fatalf("unexpected completions body: %s", string(bodyCmpl))
 	}
 
 	respSyncChat, err := client.Post(proxyTestServer.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"stream":false,"messages":[{"role":"user","content":"hi"}]}`))
