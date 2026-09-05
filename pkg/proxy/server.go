@@ -90,31 +90,72 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+type MetricsResponse struct {
+	UpstreamSSEEvents      int64   `json:"upstream_sse_events"`
+	DownstreamSSEEvents    int64   `json:"downstream_sse_events"`
+	OverallCoalescingRatio float64 `json:"overall_coalescing_ratio"`
+
+	ReasoningFragmentsIn    int64   `json:"reasoning_fragments_in"`
+	ReasoningEventsOut      int64   `json:"reasoning_events_out"`
+	ReasoningCoalescingRatio float64 `json:"reasoning_coalescing_ratio"`
+
+	ContentFragmentsIn    int64   `json:"content_fragments_in"`
+	ContentEventsOut      int64   `json:"content_events_out"`
+	ContentCoalescingRatio float64 `json:"content_coalescing_ratio"`
+
+	ToolFragmentsIn    int64   `json:"tool_fragments_in"`
+	ToolEventsOut      int64   `json:"tool_events_out"`
+	ToolCoalescingRatio float64 `json:"tool_coalescing_ratio"`
+
+	UpstreamBytes                 int64   `json:"upstream_bytes"`
+	DownstreamBytes               int64   `json:"downstream_bytes"`
+	CompressionUncompressedBytes int64   `json:"compression_uncompressed_bytes"`
+	CompressionCompressedBytes   int64   `json:"compression_compressed_bytes"`
+	CompressionRatio              float64 `json:"compression_ratio"`
+	CompressionSavingsRatio       float64 `json:"compression_savings_ratio"`
+	CompressionSavingsRatioPercent string  `json:"compression_savings_ratio_percent"`
+
+	PendingBytesMax       int64 `json:"pending_bytes_max"`
+	ReaderPauseCount      int64 `json:"reader_pause_count"`
+	ReaderPauseDurationNs int64 `json:"reader_pause_duration_ns"`
+	DownstreamWriteNs     int64 `json:"downstream_write_ns"`
+}
+
+func formatRatioPercent(r float64) string {
+	return fmt.Sprintf("%.2f%%", r*100)
+}
+
 func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	summary := map[string]interface{}{
-		"upstream_sse_events":        s.totalMetrics.UpstreamSSEEvents,
-		"downstream_sse_events":      s.totalMetrics.DownstreamSSEEvents,
-		"overall_coalescing_ratio":   s.totalMetrics.OverallCoalescingRatio(),
-		"reasoning_fragments_in":     s.totalMetrics.ReasoningFragmentsIn,
-		"reasoning_events_out":       s.totalMetrics.ReasoningEventsOut,
-		"reasoning_coalescing_ratio": s.totalMetrics.ReasoningCoalescingRatio(),
-		"content_fragments_in":       s.totalMetrics.ContentFragmentsIn,
-		"content_events_out":         s.totalMetrics.ContentEventsOut,
-		"content_coalescing_ratio":   s.totalMetrics.ContentCoalescingRatio(),
-		"tool_fragments_in":          s.totalMetrics.ToolArgumentFragmentsIn,
-		"tool_events_out":            s.totalMetrics.ToolEventsOut,
-		"tool_coalescing_ratio":      s.totalMetrics.ToolCoalescingRatio(),
-		"upstream_bytes":                 s.totalMetrics.UpstreamBytes,
-		"downstream_bytes":               s.totalMetrics.DownstreamBytes,
-		"compression_uncompressed_bytes": s.totalMetrics.CompressionUncompressedBytes,
-		"compression_compressed_bytes":   s.totalMetrics.CompressionCompressedBytes,
-		"compression_ratio":              s.totalMetrics.CompressionRatio(),
-		"compression_savings_ratio":      s.totalMetrics.CompressionSavingsRatio(),
-		"pending_bytes_max":              s.totalMetrics.PendingBytesMax,
-		"reader_pause_count":         s.totalMetrics.ReaderPauseCount,
-		"reader_pause_duration_ns":   s.totalMetrics.ReaderPauseDurationNs,
-		"downstream_write_ns":        s.totalMetrics.DownstreamWriteNs,
+	summary := MetricsResponse{
+		UpstreamSSEEvents:      s.totalMetrics.UpstreamSSEEvents,
+		DownstreamSSEEvents:    s.totalMetrics.DownstreamSSEEvents,
+		OverallCoalescingRatio: s.totalMetrics.OverallCoalescingRatio(),
+
+		ReasoningFragmentsIn:    s.totalMetrics.ReasoningFragmentsIn,
+		ReasoningEventsOut:      s.totalMetrics.ReasoningEventsOut,
+		ReasoningCoalescingRatio: s.totalMetrics.ReasoningCoalescingRatio(),
+
+		ContentFragmentsIn:    s.totalMetrics.ContentFragmentsIn,
+		ContentEventsOut:      s.totalMetrics.ContentEventsOut,
+		ContentCoalescingRatio: s.totalMetrics.ContentCoalescingRatio(),
+
+		ToolFragmentsIn:    s.totalMetrics.ToolArgumentFragmentsIn,
+		ToolEventsOut:      s.totalMetrics.ToolEventsOut,
+		ToolCoalescingRatio: s.totalMetrics.ToolCoalescingRatio(),
+
+		UpstreamBytes:                 s.totalMetrics.UpstreamBytes,
+		DownstreamBytes:               s.totalMetrics.DownstreamBytes,
+		CompressionUncompressedBytes: s.totalMetrics.CompressionUncompressedBytes,
+		CompressionCompressedBytes:   s.totalMetrics.CompressionCompressedBytes,
+		CompressionRatio:              s.totalMetrics.CompressionRatio(),
+		CompressionSavingsRatio:       s.totalMetrics.CompressionSavingsRatio(),
+		CompressionSavingsRatioPercent: formatRatioPercent(s.totalMetrics.CompressionSavingsRatio()),
+
+		PendingBytesMax:       s.totalMetrics.PendingBytesMax,
+		ReaderPauseCount:      s.totalMetrics.ReaderPauseCount,
+		ReaderPauseDurationNs: s.totalMetrics.ReaderPauseDurationNs,
+		DownstreamWriteNs:     s.totalMetrics.DownstreamWriteNs,
 	}
 	_ = json.NewEncoder(w).Encode(summary)
 }

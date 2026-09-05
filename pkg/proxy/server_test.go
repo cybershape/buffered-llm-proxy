@@ -393,6 +393,87 @@ func TestProxyMetricsCompression(t *testing.T) {
 	if _, ok := m["compression_compressed_bytes"]; !ok {
 		t.Fatalf("missing compression_compressed_bytes in metrics")
 	}
+	val, ok := m["compression_savings_ratio_percent"].(string)
+	if !ok || !strings.HasSuffix(val, "%") {
+		t.Fatalf("expected percentage string for compression_savings_ratio_percent, got: %v", m["compression_savings_ratio_percent"])
+	}
+}
+
+func TestMetricsJSONFieldOrder(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:8000")
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI:    true,
+		DisableCompression: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	dec := json.NewDecoder(strings.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		t.Fatalf("expected JSON object start")
+	}
+
+	var actualOrder []string
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("decode key failed: %v", err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			t.Fatalf("expected string key")
+		}
+		actualOrder = append(actualOrder, key)
+		var dummy interface{}
+		if err := dec.Decode(&dummy); err != nil {
+			t.Fatalf("decode value failed: %v", err)
+		}
+	}
+
+	expectedOrder := []string{
+		"upstream_sse_events",
+		"downstream_sse_events",
+		"overall_coalescing_ratio",
+		"reasoning_fragments_in",
+		"reasoning_events_out",
+		"reasoning_coalescing_ratio",
+		"content_fragments_in",
+		"content_events_out",
+		"content_coalescing_ratio",
+		"tool_fragments_in",
+		"tool_events_out",
+		"tool_coalescing_ratio",
+		"upstream_bytes",
+		"downstream_bytes",
+		"compression_uncompressed_bytes",
+		"compression_compressed_bytes",
+		"compression_ratio",
+		"compression_savings_ratio",
+		"compression_savings_ratio_percent",
+		"pending_bytes_max",
+		"reader_pause_count",
+		"reader_pause_duration_ns",
+		"downstream_write_ns",
+	}
+
+	if len(actualOrder) != len(expectedOrder) {
+		t.Fatalf("field count mismatch: got %d, want %d", len(actualOrder), len(expectedOrder))
+	}
+	for i := range expectedOrder {
+		if actualOrder[i] != expectedOrder[i] {
+			t.Fatalf("field index %d mismatch: got %q, want %q", i, actualOrder[i], expectedOrder[i])
+		}
+	}
 }
 
 func TestProxyDebugMetricsNotFound(t *testing.T) {
