@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"buffered-proxy/pkg/aggregator"
 	"buffered-proxy/pkg/sse"
@@ -516,6 +517,7 @@ func TestMetricsJSONFieldOrder(t *testing.T) {
 		"reader_pause_count",
 		"reader_pause_duration_ns",
 		"downstream_write_ns",
+		"models",
 	}
 
 	if len(actualOrder) != len(expectedOrder) {
@@ -573,5 +575,156 @@ func TestProxyDisableCompression(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "gpt-4o") {
 		t.Fatalf("expected plaintext gpt-4o, got %s", rec.Body.String())
+	}
+}
+
+func TestProxyDashboardEndpoint(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:9999")
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	// GET /dashboard
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	cType := rec.Header().Get("Content-Type")
+	if !strings.Contains(cType, "text/html") {
+		t.Fatalf("expected text/html content type, got: %s", cType)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Buffered Proxy 监控仪表盘") {
+		t.Errorf("missing dashboard title in html")
+	}
+	if !strings.Contains(body, "生效配置 (Effective Configurations)") {
+		t.Errorf("missing effective configs section in html")
+	}
+	if !strings.Contains(body, "模型性能指标 (Model Performance: TTFT &amp; TPS)") && !strings.Contains(body, "模型性能指标") {
+		t.Errorf("missing model performance section in html")
+	}
+	if !strings.Contains(body, "http://127.0.0.1:9999") {
+		t.Errorf("expected upstream url injected into html")
+	}
+	if !strings.Contains(body, "fetch('/metrics')") {
+		t.Errorf("expected fetch metrics in javascript")
+	}
+	if !strings.Contains(body, "5") {
+		t.Errorf("expected 5 seconds refresh setting in html")
+	}
+
+	// HEAD /dashboard
+	headRec := httptest.NewRecorder()
+	headReq := httptest.NewRequest(http.MethodHead, "/dashboard", nil)
+	proxySrv.ServeHTTP(headRec, headReq)
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for HEAD /dashboard, got %d", headRec.Code)
+	}
+	if headRec.Body.Len() != 0 {
+		t.Fatalf("expected empty body for HEAD, got %d bytes", headRec.Body.Len())
+	}
+
+	// POST /dashboard -> 405
+	postRec := httptest.NewRecorder()
+	postReq := httptest.NewRequest(http.MethodPost, "/dashboard", nil)
+	proxySrv.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for POST /dashboard, got %d", postRec.Code)
+	}
+
+	// Disabled metrics API -> 404
+	disabledSrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: false,
+	})
+	disRec := httptest.NewRecorder()
+	disReq := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	disabledSrv.ServeHTTP(disRec, disReq)
+	if disRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when AllowMetricsAPI is false, got %d", disRec.Code)
+	}
+}
+
+func TestProxyModelTTFTAndTPS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		// Delay slightly to test TTFT
+		time.Sleep(10 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		flusher.Flush()
+
+		time.Sleep(10 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"}}]}\n\n"))
+		flusher.Flush()
+
+		time.Sleep(10 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"World!\"}}]}\n\n"))
+		flusher.Flush()
+
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI:    true,
+		DisableCompression: true,
+	})
+
+	chatReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"custom-test-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	chatRec := httptest.NewRecorder()
+	proxySrv.ServeHTTP(chatRec, chatReq)
+
+	if chatRec.Code != http.StatusOK {
+		t.Fatalf("chat request failed: %d", chatRec.Code)
+	}
+
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRec := httptest.NewRecorder()
+	proxySrv.ServeHTTP(metricsRec, metricsReq)
+
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("metrics request failed: %d", metricsRec.Code)
+	}
+
+	var resp MetricsResponse
+	if err := json.Unmarshal(metricsRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode metrics response: %v", err)
+	}
+
+	m, ok := resp.Models["custom-test-model"]
+	if !ok {
+		t.Fatalf("expected custom-test-model in models metrics, got: %+v", resp.Models)
+	}
+
+	if m.Requests != 1 {
+		t.Errorf("expected 1 request, got %d", m.Requests)
+	}
+	if m.TotalTokens != 2 {
+		t.Errorf("expected 2 total tokens from usage, got %d", m.TotalTokens)
+	}
+	if m.AvgTTFTMs <= 0 {
+		t.Errorf("expected AvgTTFTMs > 0, got %f", m.AvgTTFTMs)
+	}
+	if m.LastTTFTMs <= 0 {
+		t.Errorf("expected LastTTFTMs > 0, got %f", m.LastTTFTMs)
+	}
+	if m.TPS <= 0 {
+		t.Errorf("expected TPS > 0, got %f", m.TPS)
 	}
 }

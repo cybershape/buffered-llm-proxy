@@ -159,6 +159,37 @@ func TestEndToEndFullFlow(t *testing.T) {
 	if downEvents, ok := metricsMap["downstream_sse_events"].(float64); !ok || downEvents == 0 {
 		t.Fatalf("expected non-zero downstream_sse_events in metrics: %v", metricsMap)
 	}
+
+	modelsMap, ok := metricsMap["models"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected models map in metrics: %v", metricsMap)
+	}
+	mockR1, ok := modelsMap["mock-r1"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mock-r1 in models: %v", modelsMap)
+	}
+	if reqs, ok := mockR1["requests"].(float64); !ok || reqs != 1 {
+		t.Errorf("expected 1 request for mock-r1, got: %v", mockR1["requests"])
+	}
+	if tps, ok := mockR1["tps"].(float64); !ok || tps <= 0 {
+		t.Errorf("expected positive TPS for mock-r1, got: %v", mockR1["tps"])
+	}
+	if ttft, ok := mockR1["avg_ttft_ms"].(float64); !ok || ttft <= 0 {
+		t.Errorf("expected positive Avg TTFT for mock-r1, got: %v", mockR1["avg_ttft_ms"])
+	}
+
+	respDashboard, err := client.Get(proxyTestServer.URL + "/dashboard")
+	if err != nil || respDashboard.StatusCode != http.StatusOK {
+		t.Fatalf("failed to get dashboard: %v", err)
+	}
+	bodyDash, _ := io.ReadAll(respDashboard.Body)
+	_ = respDashboard.Body.Close()
+	if !strings.Contains(string(bodyDash), "生效配置") {
+		t.Fatalf("missing effective configs in dashboard")
+	}
+	if !strings.Contains(string(bodyDash), "模型性能指标") {
+		t.Fatalf("missing model performance in dashboard")
+	}
 }
 
 func TestUnknownEventPassthrough(t *testing.T) {

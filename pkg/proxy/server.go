@@ -3,8 +3,10 @@ package proxy
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +18,22 @@ import (
 	"buffered-proxy/pkg/compress"
 	"buffered-proxy/pkg/metrics"
 )
+
+//go:embed dashboard.html
+var dashboardHTMLTemplate string
+
+var dashboardTmpl = template.Must(template.New("dashboard").Parse(dashboardHTMLTemplate))
+
+type EffectiveConfig struct {
+	UpstreamURL        string `json:"upstream_url"`
+	HighWatermarkMB    int64  `json:"high_watermark_mb"`
+	HighWatermarkBytes int64  `json:"high_watermark_bytes"`
+	LowWatermarkMB     int64  `json:"low_watermark_mb"`
+	LowWatermarkBytes  int64  `json:"low_watermark_bytes"`
+	MinCoalesceWaitMs  int64  `json:"min_coalesce_wait_ms"`
+	CompressionEnabled bool   `json:"compression_enabled"`
+	MetricsAPIEnabled  bool   `json:"metrics_api_enabled"`
+}
 
 type ServerConfig struct {
 	UpstreamURL        *url.URL
@@ -60,6 +78,25 @@ func (s *ProxyServer) TotalMetrics() *metrics.StreamMetrics {
 	return s.totalMetrics
 }
 
+func (s *ProxyServer) EffectiveConfig() EffectiveConfig {
+	var upstreamStr string
+	if s.cfg.UpstreamURL != nil {
+		upstreamStr = s.cfg.UpstreamURL.String()
+	}
+	hw := s.cfg.BufferConfig.HighWatermark
+	lw := s.cfg.BufferConfig.LowWatermark
+	return EffectiveConfig{
+		UpstreamURL:        upstreamStr,
+		HighWatermarkMB:    hw / (1024 * 1024),
+		HighWatermarkBytes: hw,
+		LowWatermarkMB:     lw / (1024 * 1024),
+		LowWatermarkBytes:  lw,
+		MinCoalesceWaitMs:  s.cfg.BufferConfig.MinCoalesceWait.Milliseconds(),
+		CompressionEnabled: !s.cfg.DisableCompression,
+		MetricsAPIEnabled:  s.cfg.AllowMetricsAPI,
+	}
+}
+
 func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.DisableCompression {
 		cw, cleanup := compress.WrapResponseWriter(w, r, s.totalMetrics)
@@ -67,12 +104,16 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = cw
 	}
 
-	if s.cfg.AllowMetricsAPI && r.URL.Path == "/metrics" {
+	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
+	if s.cfg.AllowMetricsAPI && (cleanPath == "/metrics" || cleanPath == "/dashboard") {
+		if cleanPath == "/dashboard" {
+			s.handleDashboard(w, r)
+			return
+		}
 		s.handleMetrics(w, r)
 		return
 	}
 
-	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
 	if cleanPath == "/v1/chat/completions" {
 		if r.Method == http.MethodPost {
 			s.handleChatCompletions(w, r)
@@ -115,10 +156,11 @@ type MetricsResponse struct {
 	CompressionSavingsRatio        float64 `json:"compression_savings_ratio"`
 	CompressionSavingsRatioPercent string  `json:"compression_savings_ratio_percent"`
 
-	PendingBytesMax       int64 `json:"pending_bytes_max"`
-	ReaderPauseCount      int64 `json:"reader_pause_count"`
-	ReaderPauseDurationNs int64 `json:"reader_pause_duration_ns"`
-	DownstreamWriteNs     int64 `json:"downstream_write_ns"`
+	PendingBytesMax       int64                                  `json:"pending_bytes_max"`
+	ReaderPauseCount      int64                                  `json:"reader_pause_count"`
+	ReaderPauseDurationNs int64                                  `json:"reader_pause_duration_ns"`
+	DownstreamWriteNs     int64                                  `json:"downstream_write_ns"`
+	Models                map[string]metrics.ModelMetricSnapshot `json:"models"`
 }
 
 func formatRatioPercent(r float64) string {
@@ -127,6 +169,11 @@ func formatRatioPercent(r float64) string {
 
 func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	modelsSnap := s.totalMetrics.ModelSnapshots()
+	if modelsSnap == nil {
+		modelsSnap = make(map[string]metrics.ModelMetricSnapshot)
+	}
+
 	summary := MetricsResponse{
 		UpstreamSSEEvents:      s.totalMetrics.UpstreamSSEEvents,
 		DownstreamSSEEvents:    s.totalMetrics.DownstreamSSEEvents,
@@ -156,12 +203,34 @@ func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		ReaderPauseCount:      s.totalMetrics.ReaderPauseCount,
 		ReaderPauseDurationNs: s.totalMetrics.ReaderPauseDurationNs,
 		DownstreamWriteNs:     s.totalMetrics.DownstreamWriteNs,
+		Models:                modelsSnap,
 	}
 	_ = json.NewEncoder(w).Encode(summary)
 }
 
+type dashboardViewData struct {
+	ConfigJSON template.JS
+}
+
+func (s *ProxyServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfgJSON, _ := json.Marshal(s.EffectiveConfig())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_ = dashboardTmpl.Execute(w, dashboardViewData{
+		ConfigJSON: template.JS(cfgJSON),
+	})
+}
+
 type streamCheckPayload struct {
-	Stream bool `json:"stream"`
+	Stream bool   `json:"stream"`
+	Model  string `json:"model"`
 }
 
 func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +263,7 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Del("Accept-Encoding")
 
+	reqStartTime := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
@@ -223,6 +293,7 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	reqMetrics := s.totalMetrics
 	pipeline := aggregator.NewStreamPipeline(s.cfg.BufferConfig, reqMetrics)
+	pipeline.SetRequestInfo(payload.Model, reqStartTime)
 
 	_ = pipeline.ProcessStream(r.Context(), resp.Body, w)
 }

@@ -22,6 +22,10 @@ func (p *Parser) Metadata() CommonMetadata {
 	return p.meta
 }
 
+func (p *Parser) Model() string {
+	return p.meta.Model
+}
+
 func (p *Parser) ParseEvent(ev *sse.Event) ([]Segment, error) {
 	data := bytes.TrimSpace(ev.Data)
 	if len(data) == 0 {

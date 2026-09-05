@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Buffered Proxy 监控仪表盘</title>
+    <!-- 防闪烁主题初始化：默认跟随系统，支持本地存储偏好 -->
+    <script>
+        (function() {
+            const saved = localStorage.getItem('dashboard-theme') || 'system';
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const effective = saved === 'system' ? (prefersDark ? 'dark' : 'light') : saved;
+            document.documentElement.setAttribute('data-theme', effective);
+        })();
+    </script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css">
+    <style>
+        .font-mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        .status-dot {
+            width: 7px;
+            height: 7px;
+            background: currentColor;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.35; transform: scale(0.85); }
+        }
+        .stat-number {
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+    </style>
+</head>
+<body class="p-4 p-6-tablet">
+    <div class="container is-max-widescreen">
+        <!-- 顶栏 Header: 结合 Hero & Level 组件 -->
+        <div class="hero is-small mb-5" style="border-bottom: 1px solid var(--bulma-border); padding-bottom: 1.5rem;">
+            <nav class="level">
+                <div class="level-left">
+                    <div>
+                        <div class="is-flex is-align-items-center">
+                            <h1 class="title is-4 mb-0 mr-3">Buffered Proxy 监控仪表盘</h1>
+                            <div class="tags has-addons mb-0">
+                                <span class="tag is-success is-light">
+                                    <span class="status-dot"></span>运行中
+                                </span>
+                                <span class="tag is-dark">Proxy Active</span>
+                            </div>
+                        </div>
+                        <p class="subtitle is-6 has-text-grey mt-1 mb-0">高性能流式聚合代理 · 实时运行状态与指标监控</p>
+                    </div>
+                </div>
+                <div class="level-right mt-3 mt-0-tablet">
+                    <div class="level-item">
+                        <!-- 主题切换按钮 -->
+                        <button class="button is-small mr-3 font-mono" id="theme-btn" onclick="toggleTheme()" title="切换主题: 跟随系统 / 浅色 / 深色">
+                            <span id="theme-icon">🌓</span>
+                            <span id="theme-text" class="ml-1 is-size-7">系统</span>
+                        </button>
+                        <div class="tags has-addons mr-3 mb-0">
+                            <span class="tag is-dark">自动刷新</span>
+                            <span class="tag is-info font-mono" id="countdown">5s</span>
+                        </div>
+                        <span class="tag is-dark is-light font-mono mr-3" id="last-update">更新中...</span>
+                        <button class="button is-small is-info is-outlined" onclick="manualRefresh()">立即刷新</button>
+                    </div>
+                </div>
+            </nav>
+        </div>
+
+        <!-- 上面：生效配置 (使用 Card + Columns 组件) -->
+        <div class="card mb-6">
+            <header class="card-header">
+                <p class="card-header-title">
+                    <span class="tag is-info is-light mr-2">系统设置</span>
+                    <span>生效配置 (Effective Configurations)</span>
+                </p>
+            </header>
+            <div class="card-content">
+                <div class="columns is-multiline">
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">上游目标地址 (Upstream URL)</p>
+                            <p class="title is-6 has-text-info font-mono mb-2" id="cfg-upstream" style="word-break: break-all;">-</p>
+                            <p class="help has-text-grey">下游请求转发目标地址</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">高水位限制 (Max Buffer / High Watermark)</p>
+                            <p class="title is-5 font-mono mb-2" id="cfg-high-water">-</p>
+                            <p class="help has-text-grey font-mono" id="cfg-high-water-bytes">-</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">低水位释放线 (Low Watermark)</p>
+                            <p class="title is-5 font-mono mb-2" id="cfg-low-water">-</p>
+                            <p class="help has-text-grey font-mono" id="cfg-low-water-bytes">-</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">协同聚合延迟 (Min Coalesce Wait)</p>
+                            <p class="title is-5 font-mono mb-2" id="cfg-coalesce-ms">-</p>
+                            <p class="help has-text-grey">流控等待时延窗口</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">网络响应压缩 (Response Compression)</p>
+                            <div class="mb-2" id="cfg-compression">-</div>
+                            <p class="help has-text-grey">gzip, zstd 自适应压缩</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">指标监控接口 (Metrics &amp; Dashboard)</p>
+                            <div class="mb-2" id="cfg-metrics-api">-</div>
+                            <p class="help has-text-grey">/metrics &amp; /dashboard</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 下面：分类展示 Metrics -->
+        <!-- 1. 模型性能指标 (使用 Card + TableContainer + Table 组件) -->
+        <div class="card mb-6">
+            <header class="card-header">
+                <p class="card-header-title">
+                    <span class="tag is-primary is-light mr-2">模型指标</span>
+                    <span>模型性能指标 (Model Performance: TTFT &amp; TPS)</span>
+                </p>
+                <div class="card-header-icon">
+                    <span class="tag is-dark font-mono" id="model-count-tag">0 个活跃模型</span>
+                </div>
+            </header>
+            <div class="card-content p-0">
+                <div class="table-container mb-0">
+                    <table class="table is-fullwidth is-striped is-hoverable mb-0">
+                        <thead>
+                            <tr>
+                                <th>模型名称 (Model)</th>
+                                <th>请求总数</th>
+                                <th>平均首字耗时 (Avg TTFT)</th>
+                                <th>最近首字耗时 (Last TTFT)</th>
+                                <th>输出速率 (TPS)</th>
+                                <th>累计 Token 数</th>
+                                <th>累计生成耗时</th>
+                            </tr>
+                        </thead>
+                        <tbody id="models-table-body">
+                            <tr>
+                                <td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. 流语义聚合指标 (使用 Card + Columns + Level 组件) -->
+        <div class="card mb-6">
+            <header class="card-header">
+                <p class="card-header-title">
+                    <span class="tag is-link is-light mr-2">语义合并</span>
+                    <span>流语义聚合指标 (Semantic Coalescing)</span>
+                </p>
+            </header>
+            <div class="card-content">
+                <div class="columns is-multiline">
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">整体事件合并比 (Overall Ratio)</p>
+                            <p class="stat-number has-text-info font-mono mb-2" id="metric-overall-ratio">0.00:1</p>
+                            <p class="help has-text-grey font-mono" id="metric-overall-detail">In: 0 / Out: 0</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">推理流合并比 (Reasoning Ratio)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-reasoning-ratio">0.00:1</p>
+                            <p class="help has-text-grey font-mono" id="metric-reasoning-detail">In: 0 / Out: 0</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">正文流合并比 (Content Ratio)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-content-ratio">0.00:1</p>
+                            <p class="help has-text-grey font-mono" id="metric-content-detail">In: 0 / Out: 0</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">工具调用合并比 (Tool Ratio)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-tool-ratio">0.00:1</p>
+                            <p class="help has-text-grey font-mono" id="metric-tool-detail">In: 0 / Out: 0</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. 网络流量与传输压缩 (使用 Card + Columns 组件) -->
+        <div class="card mb-6">
+            <header class="card-header">
+                <p class="card-header-title">
+                    <span class="tag is-warning is-light mr-2">流量压缩</span>
+                    <span>网络流量与数据压缩 (Traffic &amp; Wire Compression)</span>
+                </p>
+            </header>
+            <div class="card-content">
+                <div class="columns is-multiline">
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">上游接收流量 (Upstream Traffic)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-upstream-bytes">0 B</p>
+                            <p class="help has-text-grey font-mono" id="metric-upstream-raw">0 字节</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">下游发送流量 (Downstream Traffic)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-downstream-bytes">0 B</p>
+                            <p class="help has-text-grey font-mono" id="metric-downstream-raw">0 字节</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">数据压缩比率 (Compression Ratio)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-compression-ratio">0.00:1</p>
+                            <p class="help has-text-grey font-mono" id="metric-compression-bytes">原始: 0 B / 压缩: 0 B</p>
+                        </div>
+                    </div>
+                    <div class="column is-3">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">带宽节省率 (Savings Percent)</p>
+                            <p class="stat-number has-text-success font-mono mb-2" id="metric-savings-percent">0.00%</p>
+                            <p class="help has-text-grey font-mono" id="metric-savings-ratio">比率: 0.0000</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. 缓冲水位与并发系统开销 (使用 Card + Columns 组件) -->
+        <div class="card mb-6">
+            <header class="card-header">
+                <p class="card-header-title">
+                    <span class="tag is-danger is-light mr-2">并发缓冲</span>
+                    <span>缓冲水位与系统并发 (Buffer &amp; Concurrency)</span>
+                </p>
+            </header>
+            <div class="card-content">
+                <div class="columns is-multiline">
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">待发送缓冲峰值 (Pending Bytes Max)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-pending-max">0 B</p>
+                            <p class="help has-text-grey font-mono" id="metric-pending-raw">0 字节</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">读取流控暂停次数 (Reader Pauses)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-reader-pauses">0 次</p>
+                            <p class="help has-text-grey font-mono" id="metric-pause-duration">累计暂停: 0 ms</p>
+                        </div>
+                    </div>
+                    <div class="column is-4">
+                        <div class="box h-100">
+                            <p class="heading has-text-grey mb-1">下游网络写入耗时 (Downstream Write Duration)</p>
+                            <p class="stat-number font-mono mb-2" id="metric-write-duration">0 ms</p>
+                            <p class="help has-text-grey">下游套接字写入累计时长</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 服务端注入的配置 JSON -->
+    <script id="server-config" type="application/json">
+        {{.ConfigJSON}}
+    </script>
+
+    <script>
+        // 主题管理（跟随系统 / 浅色 / 深色）
+        const themeConfigs = {
+            system: { label: '系统', icon: '🌓' },
+            light: { label: '浅色', icon: '☀️' },
+            dark: { label: '深色', icon: '🌙' }
+        };
+        const themeOrder = ['system', 'light', 'dark'];
+
+        function getEffectiveTheme(pref) {
+            if (pref === 'system') {
+                return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+            }
+            return pref;
+        }
+
+        function applyTheme(theme) {
+            const effective = getEffectiveTheme(theme);
+            document.documentElement.setAttribute('data-theme', effective);
+
+            const icon = document.getElementById('theme-icon');
+            const text = document.getElementById('theme-text');
+            if (icon && text) {
+                const conf = themeConfigs[theme] || themeConfigs.system;
+                icon.textContent = conf.icon;
+                text.textContent = conf.label;
+            }
+        }
+
+        function toggleTheme() {
+            const current = localStorage.getItem('dashboard-theme') || 'system';
+            const nextIdx = (themeOrder.indexOf(current) + 1) % themeOrder.length;
+            const next = themeOrder[nextIdx];
+            localStorage.setItem('dashboard-theme', next);
+            applyTheme(next);
+        }
+
+        if (window.matchMedia) {
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+                const saved = localStorage.getItem('dashboard-theme') || 'system';
+                if (saved === 'system') {
+                    applyTheme('system');
+                }
+            });
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatDurationMs(ms) {
+            if (ms < 1) return ms.toFixed(2) + ' ms';
+            if (ms < 1000) return ms.toFixed(1) + ' ms';
+            return (ms / 1000).toFixed(2) + ' s';
+        }
+
+        function formatDurationNs(ns) {
+            return formatDurationMs(ns / 1e6);
+        }
+
+        // 渲染生效配置
+        function renderConfig() {
+            try {
+                const cfgEl = document.getElementById('server-config');
+                if (!cfgEl || !cfgEl.textContent.trim()) return;
+                const cfg = JSON.parse(cfgEl.textContent);
+
+                document.getElementById('cfg-upstream').textContent = cfg.upstream_url || '-';
+                
+                const highMB = cfg.high_watermark_mb || Math.round(cfg.high_watermark_bytes / 1024 / 1024);
+                document.getElementById('cfg-high-water').textContent = highMB + ' MB';
+                document.getElementById('cfg-high-water-bytes').textContent = (cfg.high_watermark_bytes || 0).toLocaleString() + ' 字节';
+
+                const lowMB = cfg.low_watermark_mb || Math.round(cfg.low_watermark_bytes / 1024 / 1024);
+                document.getElementById('cfg-low-water').textContent = lowMB + ' MB';
+                document.getElementById('cfg-low-water-bytes').textContent = (cfg.low_watermark_bytes || 0).toLocaleString() + ' 字节';
+
+                document.getElementById('cfg-coalesce-ms').textContent = (cfg.min_coalesce_wait_ms || 0) + ' ms';
+                
+                const compEl = document.getElementById('cfg-compression');
+                compEl.innerHTML = cfg.compression_enabled ? 
+                    '<span class="tag is-success is-light">已开启 (gzip, zstd)</span>' : 
+                    '<span class="tag is-dark">已禁用</span>';
+
+                const metricsEl = document.getElementById('cfg-metrics-api');
+                metricsEl.innerHTML = cfg.metrics_api_enabled ? 
+                    '<span class="tag is-success is-light">已开启</span>' : 
+                    '<span class="tag is-dark">已禁用</span>';
+            } catch (e) {
+                console.error('Failed to parse config json', e);
+            }
+        }
+
+        // 渲染 Metrics 数据
+        function renderMetrics(data) {
+            // 1. 模型指标
+            const modelsTbody = document.getElementById('models-table-body');
+            const models = data.models || {};
+            const modelKeys = Object.keys(models);
+
+            const countTag = document.getElementById('model-count-tag');
+            if (countTag) {
+                countTag.textContent = modelKeys.length + ' 个活跃模型';
+            }
+
+            if (modelKeys.length === 0) {
+                modelsTbody.innerHTML = '<tr><td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td></tr>';
+            } else {
+                let rowsHtml = '';
+                modelKeys.sort().forEach(modelName => {
+                    const m = models[modelName];
+                    const tps = m.tps !== undefined ? m.tps.toFixed(2) : '0.00';
+                    const avgTtft = m.avg_ttft_ms !== undefined ? formatDurationMs(m.avg_ttft_ms) : '-';
+                    const lastTtft = m.last_ttft_ms !== undefined ? formatDurationMs(m.last_ttft_ms) : '-';
+                    const genDur = m.total_generation_duration_ms !== undefined ? formatDurationMs(m.total_generation_duration_ms) : '-';
+
+                    rowsHtml += `
+                        <tr>
+                            <td><span class="tag is-info is-light font-mono has-text-weight-bold">${modelName}</span></td>
+                            <td class="font-mono">${(m.requests || 0).toLocaleString()}</td>
+                            <td class="font-mono"><strong class="has-text-info">${avgTtft}</strong></td>
+                            <td class="font-mono">${lastTtft}</td>
+                            <td class="font-mono"><strong class="has-text-success">${tps}</strong> <span class="is-size-7 has-text-grey">tok/s</span></td>
+                            <td class="font-mono">${(m.total_tokens || 0).toLocaleString()}</td>
+                            <td class="font-mono">${genDur}</td>
+                        </tr>
+                    `;
+                });
+                modelsTbody.innerHTML = rowsHtml;
+            }
+
+            // 2. 语义聚合
+            document.getElementById('metric-overall-ratio').textContent = (data.overall_coalescing_ratio || 0).toFixed(2) + ':1';
+            document.getElementById('metric-overall-detail').textContent = `In: ${(data.upstream_sse_events || 0).toLocaleString()} / Out: ${(data.downstream_sse_events || 0).toLocaleString()}`;
+
+            document.getElementById('metric-reasoning-ratio').textContent = (data.reasoning_coalescing_ratio || 0).toFixed(2) + ':1';
+            document.getElementById('metric-reasoning-detail').textContent = `In: ${(data.reasoning_fragments_in || 0).toLocaleString()} / Out: ${(data.reasoning_events_out || 0).toLocaleString()}`;
+
+            document.getElementById('metric-content-ratio').textContent = (data.content_coalescing_ratio || 0).toFixed(2) + ':1';
+            document.getElementById('metric-content-detail').textContent = `In: ${(data.content_fragments_in || 0).toLocaleString()} / Out: ${(data.content_events_out || 0).toLocaleString()}`;
+
+            document.getElementById('metric-tool-ratio').textContent = (data.tool_coalescing_ratio || 0).toFixed(2) + ':1';
+            document.getElementById('metric-tool-detail').textContent = `In: ${(data.tool_fragments_in || 0).toLocaleString()} / Out: ${(data.tool_events_out || 0).toLocaleString()}`;
+
+            // 3. 网络流量与压缩
+            const upBytes = data.upstream_bytes || 0;
+            const downBytes = data.downstream_bytes || 0;
+            document.getElementById('metric-upstream-bytes').textContent = formatBytes(upBytes);
+            document.getElementById('metric-upstream-raw').textContent = upBytes.toLocaleString() + ' 字节';
+            document.getElementById('metric-downstream-bytes').textContent = formatBytes(downBytes);
+            document.getElementById('metric-downstream-raw').textContent = downBytes.toLocaleString() + ' 字节';
+
+            document.getElementById('metric-compression-ratio').textContent = (data.compression_ratio || 0).toFixed(2) + ':1';
+            const uncomp = data.compression_uncompressed_bytes || 0;
+            const comp = data.compression_compressed_bytes || 0;
+            document.getElementById('metric-compression-bytes').textContent = `原始: ${formatBytes(uncomp)} / 压缩: ${formatBytes(comp)}`;
+
+            document.getElementById('metric-savings-percent').textContent = data.compression_savings_ratio_percent || '0.00%';
+            document.getElementById('metric-savings-ratio').textContent = `比率: ${(data.compression_savings_ratio || 0).toFixed(4)}`;
+
+            // 4. 缓冲与并发
+            const pendingMax = data.pending_bytes_max || 0;
+            document.getElementById('metric-pending-max').textContent = formatBytes(pendingMax);
+            document.getElementById('metric-pending-raw').textContent = pendingMax.toLocaleString() + ' 字节';
+
+            document.getElementById('metric-reader-pauses').textContent = (data.reader_pause_count || 0).toLocaleString() + ' 次';
+            document.getElementById('metric-pause-duration').textContent = '累计暂停: ' + formatDurationNs(data.reader_pause_duration_ns || 0);
+
+            document.getElementById('metric-write-duration').textContent = formatDurationNs(data.downstream_write_ns || 0);
+
+            const now = new Date();
+            document.getElementById('last-update').textContent = '上次刷新: ' + now.toTimeString().split(' ')[0];
+        }
+
+        // 轮询与自动刷新控制
+        let countdownSec = 5;
+        let countdownTimer = null;
+
+        async function fetchMetrics() {
+            try {
+                const res = await fetch('/metrics');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const data = await res.json();
+                renderMetrics(data);
+            } catch (err) {
+                console.error('Fetch /metrics failed:', err);
+                document.getElementById('last-update').textContent = '刷新异常: ' + err.message;
+            }
+        }
+
+        function resetCountdown() {
+            countdownSec = 5;
+            document.getElementById('countdown').textContent = countdownSec + 's';
+        }
+
+        function manualRefresh() {
+            resetCountdown();
+            fetchMetrics();
+        }
+
+        // 倒计时器：每秒递减，到达 0 刷新
+        function startScheduler() {
+            if (countdownTimer) clearInterval(countdownTimer);
+            countdownTimer = setInterval(() => {
+                countdownSec--;
+                if (countdownSec <= 0) {
+                    resetCountdown();
+                    fetchMetrics();
+                } else {
+                    document.getElementById('countdown').textContent = countdownSec + 's';
+                }
+            }, 1000);
+        }
+
+        // 初始化
+        window.addEventListener('DOMContentLoaded', () => {
+            applyTheme(localStorage.getItem('dashboard-theme') || 'system');
+            renderConfig();
+            fetchMetrics();
+            startScheduler();
+        });
+    </script>
+</body>
+</html>

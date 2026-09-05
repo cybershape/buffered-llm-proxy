@@ -2,9 +2,28 @@ package metrics
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type ModelMetricSnapshot struct {
+	Requests                  int64   `json:"requests"`
+	TotalTokens               int64   `json:"total_tokens"`
+	AvgTTFTMs                 float64 `json:"avg_ttft_ms"`
+	LastTTFTMs                float64 `json:"last_ttft_ms"`
+	TotalGenerationDurationMs float64 `json:"total_generation_duration_ms"`
+	TPS                       float64 `json:"tps"`
+}
+
+type modelAccumulator struct {
+	mu                        sync.Mutex
+	requests                  int64
+	totalTokens               int64
+	totalTTFTNs               int64
+	lastTTFTNs                int64
+	totalGenerationDurationNs int64
+}
 
 type StreamMetrics struct {
 	UpstreamSSEEvents            int64
@@ -24,6 +43,9 @@ type StreamMetrics struct {
 	ReaderPauseCount             int64
 	ReaderPauseDurationNs        int64
 	DownstreamWriteNs            int64
+
+	modelsMu sync.RWMutex
+	models   map[string]*modelAccumulator
 }
 
 func (m *StreamMetrics) IncUpstreamEvents() {
@@ -181,4 +203,65 @@ func (m *StreamMetrics) Summary() string {
 		time.Duration(atomic.LoadInt64(&m.ReaderPauseDurationNs)),
 		time.Duration(atomic.LoadInt64(&m.DownstreamWriteNs)),
 	)
+}
+
+func (m *StreamMetrics) RecordModelMetrics(model string, tokens int64, ttft time.Duration, genDuration time.Duration) {
+	if model == "" {
+		model = "unknown"
+	}
+	m.modelsMu.Lock()
+	if m.models == nil {
+		m.models = make(map[string]*modelAccumulator)
+	}
+	acc, ok := m.models[model]
+	if !ok {
+		acc = &modelAccumulator{}
+		m.models[model] = acc
+	}
+	m.modelsMu.Unlock()
+
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	acc.requests++
+	acc.totalTokens += tokens
+	acc.totalTTFTNs += ttft.Nanoseconds()
+	acc.lastTTFTNs = ttft.Nanoseconds()
+	acc.totalGenerationDurationNs += genDuration.Nanoseconds()
+}
+
+func (m *StreamMetrics) ModelSnapshots() map[string]ModelMetricSnapshot {
+	m.modelsMu.RLock()
+	defer m.modelsMu.RUnlock()
+
+	if len(m.models) == 0 {
+		return make(map[string]ModelMetricSnapshot)
+	}
+
+	result := make(map[string]ModelMetricSnapshot, len(m.models))
+	for name, acc := range m.models {
+		acc.mu.Lock()
+		reqs := acc.requests
+		tokens := acc.totalTokens
+		ttftNs := acc.totalTTFTNs
+		lastTtftNs := acc.lastTTFTNs
+		genNs := acc.totalGenerationDurationNs
+		acc.mu.Unlock()
+
+		snap := ModelMetricSnapshot{
+			Requests:                  reqs,
+			TotalTokens:               tokens,
+			LastTTFTMs:                float64(lastTtftNs) / 1e6,
+			TotalGenerationDurationMs: float64(genNs) / 1e6,
+		}
+		if reqs > 0 {
+			snap.AvgTTFTMs = float64(ttftNs) / float64(reqs) / 1e6
+		}
+		if genNs > 0 {
+			snap.TPS = float64(tokens) / (float64(genNs) / 1e9)
+		} else if reqs > 0 && ttftNs > 0 {
+			snap.TPS = float64(tokens) / (float64(ttftNs) / 1e9)
+		}
+		result[name] = snap
+	}
+	return result
 }
