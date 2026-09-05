@@ -165,6 +165,10 @@ func TestPendingBufferMinCoalesceWaitInterruptedByBarrier(t *testing.T) {
 	}, nil)
 
 	ctx := context.Background()
+	// Burn first emission so buffer enters normal coalesce-waiting state
+	_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "init"})
+	_, _, _ = pb.Swap(ctx)
+
 	_ = pb.Append(ctx, &semantic.ReasoningSegment{ChoiceIndex: 0, FieldName: "reasoning", Text: "thinking..."})
 
 	go func() {
@@ -204,6 +208,10 @@ func TestPendingBufferNonCoalesceableSegmentBypassesWait(t *testing.T) {
 		}, nil)
 
 		ctx := context.Background()
+		// Burn first emission so firstEmission bypass doesn't mask non-coalesceable bypass
+		_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "warmup"})
+		_, _, _ = pb.Swap(ctx)
+
 		_ = pb.Append(ctx, seg)
 
 		start := time.Now()
@@ -219,5 +227,47 @@ func TestPendingBufferNonCoalesceableSegmentBypassesWait(t *testing.T) {
 		if elapsed >= 200*time.Millisecond {
 			t.Fatalf("segment type %v should bypass min coalesce wait, took %v", seg.Type(), elapsed)
 		}
+	}
+}
+
+func TestPendingBufferFirstEmissionFastPath(t *testing.T) {
+	pb := NewPendingBuffer(BufferConfig{
+		HighWatermark:   1024 * 1024,
+		LowWatermark:    512 * 1024,
+		MinCoalesceWait: 500 * time.Millisecond,
+	}, nil)
+
+	ctx := context.Background()
+	// First emission with normal content should NOT wait 500ms
+	_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "first chunk"})
+
+	start := time.Now()
+	snap, _, err := pb.Swap(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(snap) != 1 {
+		t.Fatalf("expected 1 segment in snapshot, got %d", len(snap))
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Fatalf("expected first emission to bypass min coalesce wait for TTFT, took %v", elapsed)
+	}
+
+	// Second emission with normal content SHOULD wait minCoalesceWait
+	_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "second chunk"})
+	start2 := time.Now()
+	snap2, _, err2 := pb.Swap(ctx)
+	elapsed2 := time.Since(start2)
+
+	if err2 != nil {
+		t.Fatalf("unexpected err: %v", err2)
+	}
+	if len(snap2) != 1 {
+		t.Fatalf("expected 1 segment in snapshot, got %d", len(snap2))
+	}
+	if elapsed2 < 400*time.Millisecond {
+		t.Fatalf("expected second emission to obey min coalesce wait, took %v", elapsed2)
 	}
 }

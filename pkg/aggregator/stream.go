@@ -110,6 +110,7 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 		}
 
 		if len(snapshot) > 0 {
+			flushed := false
 			for _, seg := range snapshot {
 				out := p.serializer.SerializeSegment(seg)
 				if len(out) == 0 {
@@ -121,13 +122,11 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 					cancelReader()
 					return writeErr
 				}
-				if flusher != nil {
-					flusher.Flush()
-				}
 				p.metrics.AddDownstreamWrite(time.Since(startWrite))
 
 				p.metrics.IncDownstreamEvents()
 				p.metrics.AddDownstreamBytes(int64(len(out)))
+				flushed = true
 
 				switch seg.(type) {
 				case *semantic.ReasoningSegment:
@@ -137,6 +136,9 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 				case *semantic.ToolCallSegment:
 					p.metrics.IncToolEventsOut()
 				}
+			}
+			if flushed && flusher != nil {
+				flusher.Flush()
 			}
 		}
 

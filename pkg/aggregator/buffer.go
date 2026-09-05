@@ -35,6 +35,7 @@ type PendingBuffer struct {
 	belowHighWater  *sync.Cond
 	barrierWake     chan struct{}
 	hasBarrier      bool
+	firstEmission   bool
 	segments        []semantic.Segment
 	currentBytes    int64
 	highWatermark   int64
@@ -58,6 +59,7 @@ func NewPendingBuffer(cfg BufferConfig, m *metrics.StreamMetrics) *PendingBuffer
 		minCoalesceWait: cfg.MinCoalesceWait,
 		metrics:         m,
 		barrierWake:     make(chan struct{}),
+		firstEmission:   true,
 	}
 	pb.notEmpty = sync.NewCond(&pb.mu)
 	pb.belowHighWater = sync.NewCond(&pb.mu)
@@ -140,7 +142,10 @@ func (b *PendingBuffer) Swap(ctx context.Context) ([]semantic.Segment, bool, err
 		return nil, b.closed, b.upstreamErr
 	}
 
-	if b.minCoalesceWait > 0 && !b.hasBarrier && !b.closed && b.upstreamErr == nil {
+	// P1: Fast-path for the very first emission (TTFT optimization).
+	// Immediately emit first tokens to client without waiting for coalesce delay.
+	shouldWait := b.minCoalesceWait > 0 && !b.firstEmission && !b.hasBarrier && !b.closed && b.upstreamErr == nil
+	if shouldWait {
 		wakeCh := b.barrierWake
 		waitTimer := time.NewTimer(b.minCoalesceWait)
 		b.mu.Unlock()
@@ -170,6 +175,7 @@ func (b *PendingBuffer) Swap(ctx context.Context) ([]semantic.Segment, bool, err
 		return nil, b.closed, ctx.Err()
 	}
 
+	b.firstEmission = false
 	snapshot := b.segments
 	b.segments = nil
 	b.currentBytes = 0
