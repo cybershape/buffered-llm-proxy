@@ -83,7 +83,7 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if cleanPath == "/v1/models" && r.Method == http.MethodGet {
-		s.transparentProxy(w, r, nil)
+		s.handleModels(w, r)
 		return
 	}
 
@@ -95,24 +95,24 @@ type MetricsResponse struct {
 	DownstreamSSEEvents    int64   `json:"downstream_sse_events"`
 	OverallCoalescingRatio float64 `json:"overall_coalescing_ratio"`
 
-	ReasoningFragmentsIn    int64   `json:"reasoning_fragments_in"`
-	ReasoningEventsOut      int64   `json:"reasoning_events_out"`
+	ReasoningFragmentsIn     int64   `json:"reasoning_fragments_in"`
+	ReasoningEventsOut       int64   `json:"reasoning_events_out"`
 	ReasoningCoalescingRatio float64 `json:"reasoning_coalescing_ratio"`
 
-	ContentFragmentsIn    int64   `json:"content_fragments_in"`
-	ContentEventsOut      int64   `json:"content_events_out"`
+	ContentFragmentsIn     int64   `json:"content_fragments_in"`
+	ContentEventsOut       int64   `json:"content_events_out"`
 	ContentCoalescingRatio float64 `json:"content_coalescing_ratio"`
 
-	ToolFragmentsIn    int64   `json:"tool_fragments_in"`
-	ToolEventsOut      int64   `json:"tool_events_out"`
+	ToolFragmentsIn     int64   `json:"tool_fragments_in"`
+	ToolEventsOut       int64   `json:"tool_events_out"`
 	ToolCoalescingRatio float64 `json:"tool_coalescing_ratio"`
 
-	UpstreamBytes                 int64   `json:"upstream_bytes"`
-	DownstreamBytes               int64   `json:"downstream_bytes"`
-	CompressionUncompressedBytes int64   `json:"compression_uncompressed_bytes"`
-	CompressionCompressedBytes   int64   `json:"compression_compressed_bytes"`
-	CompressionRatio              float64 `json:"compression_ratio"`
-	CompressionSavingsRatio       float64 `json:"compression_savings_ratio"`
+	UpstreamBytes                  int64   `json:"upstream_bytes"`
+	DownstreamBytes                int64   `json:"downstream_bytes"`
+	CompressionUncompressedBytes   int64   `json:"compression_uncompressed_bytes"`
+	CompressionCompressedBytes     int64   `json:"compression_compressed_bytes"`
+	CompressionRatio               float64 `json:"compression_ratio"`
+	CompressionSavingsRatio        float64 `json:"compression_savings_ratio"`
 	CompressionSavingsRatioPercent string  `json:"compression_savings_ratio_percent"`
 
 	PendingBytesMax       int64 `json:"pending_bytes_max"`
@@ -132,24 +132,24 @@ func (s *ProxyServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		DownstreamSSEEvents:    s.totalMetrics.DownstreamSSEEvents,
 		OverallCoalescingRatio: s.totalMetrics.OverallCoalescingRatio(),
 
-		ReasoningFragmentsIn:    s.totalMetrics.ReasoningFragmentsIn,
-		ReasoningEventsOut:      s.totalMetrics.ReasoningEventsOut,
+		ReasoningFragmentsIn:     s.totalMetrics.ReasoningFragmentsIn,
+		ReasoningEventsOut:       s.totalMetrics.ReasoningEventsOut,
 		ReasoningCoalescingRatio: s.totalMetrics.ReasoningCoalescingRatio(),
 
-		ContentFragmentsIn:    s.totalMetrics.ContentFragmentsIn,
-		ContentEventsOut:      s.totalMetrics.ContentEventsOut,
+		ContentFragmentsIn:     s.totalMetrics.ContentFragmentsIn,
+		ContentEventsOut:       s.totalMetrics.ContentEventsOut,
 		ContentCoalescingRatio: s.totalMetrics.ContentCoalescingRatio(),
 
-		ToolFragmentsIn:    s.totalMetrics.ToolArgumentFragmentsIn,
-		ToolEventsOut:      s.totalMetrics.ToolEventsOut,
+		ToolFragmentsIn:     s.totalMetrics.ToolArgumentFragmentsIn,
+		ToolEventsOut:       s.totalMetrics.ToolEventsOut,
 		ToolCoalescingRatio: s.totalMetrics.ToolCoalescingRatio(),
 
-		UpstreamBytes:                 s.totalMetrics.UpstreamBytes,
-		DownstreamBytes:               s.totalMetrics.DownstreamBytes,
-		CompressionUncompressedBytes: s.totalMetrics.CompressionUncompressedBytes,
-		CompressionCompressedBytes:   s.totalMetrics.CompressionCompressedBytes,
-		CompressionRatio:              s.totalMetrics.CompressionRatio(),
-		CompressionSavingsRatio:       s.totalMetrics.CompressionSavingsRatio(),
+		UpstreamBytes:                  s.totalMetrics.UpstreamBytes,
+		DownstreamBytes:                s.totalMetrics.DownstreamBytes,
+		CompressionUncompressedBytes:   s.totalMetrics.CompressionUncompressedBytes,
+		CompressionCompressedBytes:     s.totalMetrics.CompressionCompressedBytes,
+		CompressionRatio:               s.totalMetrics.CompressionRatio(),
+		CompressionSavingsRatio:        s.totalMetrics.CompressionSavingsRatio(),
 		CompressionSavingsRatioPercent: formatRatioPercent(s.totalMetrics.CompressionSavingsRatio()),
 
 		PendingBytesMax:       s.totalMetrics.PendingBytesMax,
@@ -225,6 +225,74 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	pipeline := aggregator.NewStreamPipeline(s.cfg.BufferConfig, reqMetrics)
 
 	_ = pipeline.ProcessStream(r.Context(), resp.Body, w)
+}
+
+func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	targetURL := *s.cfg.UpstreamURL
+	targetURL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
+	targetURL.RawQuery = r.URL.RawQuery
+
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create upstream request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	copyHeaders(req.Header, r.Header)
+	req.Header.Set("User-Agent", "grok-shell")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read upstream response: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	cType := resp.Header.Get("Content-Type")
+	if resp.StatusCode == http.StatusOK && strings.Contains(cType, "application/json") {
+		var root interface{}
+		if json.Unmarshal(bodyBytes, &root) == nil {
+			if injectContentLength(root) {
+				if modified, encErr := json.Marshal(root); encErr == nil {
+					bodyBytes = modified
+				}
+			}
+		}
+	}
+
+	copyHeaders(w.Header(), resp.Header)
+	w.Header().Del("Content-Length")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(bodyBytes)
+}
+
+func injectContentLength(v interface{}) bool {
+	modified := false
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if cw, exists := val["context_window"]; exists {
+			val["content_length"] = cw
+			modified = true
+		}
+		for _, item := range val {
+			if injectContentLength(item) {
+				modified = true
+			}
+		}
+	case []interface{}:
+		for _, item := range val {
+			if injectContentLength(item) {
+				modified = true
+			}
+		}
+	}
+	return modified
 }
 
 func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, preloadedBody []byte) {

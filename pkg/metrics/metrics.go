@@ -7,23 +7,23 @@ import (
 )
 
 type StreamMetrics struct {
-	UpstreamSSEEvents       int64
-	DownstreamSSEEvents     int64
-	ReasoningFragmentsIn    int64
-	ReasoningEventsOut      int64
-	ContentFragmentsIn      int64
-	ContentEventsOut        int64
-	ToolArgumentFragmentsIn int64
-	ToolEventsOut           int64
+	UpstreamSSEEvents            int64
+	DownstreamSSEEvents          int64
+	ReasoningFragmentsIn         int64
+	ReasoningEventsOut           int64
+	ContentFragmentsIn           int64
+	ContentEventsOut             int64
+	ToolArgumentFragmentsIn      int64
+	ToolEventsOut                int64
 	UpstreamBytes                int64
 	DownstreamBytes              int64
 	CompressionUncompressedBytes int64
 	CompressionCompressedBytes   int64
 	PendingBytesCurrent          int64
-	PendingBytesMax         int64
-	ReaderPauseCount        int64
-	ReaderPauseDurationNs   int64
-	DownstreamWriteNs       int64
+	PendingBytesMax              int64
+	ReaderPauseCount             int64
+	ReaderPauseDurationNs        int64
+	DownstreamWriteNs            int64
 }
 
 func (m *StreamMetrics) IncUpstreamEvents() {

@@ -49,6 +49,58 @@ func TestProxyModelsTransparent(t *testing.T) {
 	}
 }
 
+func TestProxyModelsContextWindowAndUserAgent(t *testing.T) {
+	var capturedUA string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedUA = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"model-1","context_window":128000},{"id":"model-2","extra":{"context_window":32768}}]}`))
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if capturedUA != "grok-shell" {
+		t.Fatalf("expected upstream User-Agent 'grok-shell', got %q", capturedUA)
+	}
+
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &respMap); err != nil {
+		t.Fatalf("failed to unmarshal models response: %v", err)
+	}
+
+	dataList := respMap["data"].([]interface{})
+	m1 := dataList[0].(map[string]interface{})
+	if m1["context_window"] != float64(128000) {
+		t.Fatalf("expected context_window 128000, got %v", m1["context_window"])
+	}
+	if m1["content_length"] != float64(128000) {
+		t.Fatalf("expected content_length 128000, got %v", m1["content_length"])
+	}
+
+	m2 := dataList[1].(map[string]interface{})
+	extra := m2["extra"].(map[string]interface{})
+	if extra["context_window"] != float64(32768) {
+		t.Fatalf("expected extra.context_window 32768, got %v", extra["context_window"])
+	}
+	if extra["content_length"] != float64(32768) {
+		t.Fatalf("expected extra.content_length 32768, got %v", extra["content_length"])
+	}
+}
+
 func TestProxyCompletionsEndpointNotSupported(t *testing.T) {
 	uURL, _ := url.Parse("http://127.0.0.1:8000")
 	proxySrv := NewProxyServer(ServerConfig{
