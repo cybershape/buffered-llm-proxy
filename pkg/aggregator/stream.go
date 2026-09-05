@@ -65,10 +65,11 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 	}
 
 	var (
-		firstTokenMu   sync.Mutex
-		firstTokenTime time.Time
-		totalTokens    int64
-		usageTokens    int64
+		firstTokenMu    sync.Mutex
+		firstTokenTime  time.Time
+		upstreamEndTime time.Time
+		totalTokens     int64
+		usageTokens     int64
 	)
 
 	recordFirstToken := func() {
@@ -80,6 +81,7 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 	}
 
 	defer func() {
+		clientEndTime := time.Now()
 		model := p.initialModel
 		if model == "" {
 			model = p.parser.Model()
@@ -96,15 +98,21 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 
 		firstTokenMu.Lock()
 		ft := firstTokenTime
+		uEnd := upstreamEndTime
 		firstTokenMu.Unlock()
+
+		if uEnd.IsZero() {
+			uEnd = clientEndTime
+		}
 
 		if !ft.IsZero() {
 			ttft := ft.Sub(reqStart)
-			genDuration := time.Since(ft)
-			p.metrics.RecordModelMetrics(model, finalTokens, ttft, genDuration)
+			upstreamGenDuration := uEnd.Sub(ft)
+			clientGenDuration := clientEndTime.Sub(ft)
+			p.metrics.RecordModelMetrics(model, finalTokens, ttft, upstreamGenDuration, clientGenDuration)
 		} else if finalTokens > 0 {
-			ttft := time.Since(reqStart)
-			p.metrics.RecordModelMetrics(model, finalTokens, ttft, 0)
+			ttft := clientEndTime.Sub(reqStart)
+			p.metrics.RecordModelMetrics(model, finalTokens, ttft, 0, 0)
 		}
 	}()
 
@@ -130,7 +138,14 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 	readerErrCh := make(chan error, 1)
 
 	go func() {
-		defer close(readerErrCh)
+		defer func() {
+			firstTokenMu.Lock()
+			if upstreamEndTime.IsZero() {
+				upstreamEndTime = time.Now()
+			}
+			firstTokenMu.Unlock()
+			close(readerErrCh)
+		}()
 		sseReader := sse.NewReader(upstream)
 		for {
 			if readerCtx.Err() != nil {

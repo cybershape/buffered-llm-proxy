@@ -13,16 +13,20 @@ type ModelMetricSnapshot struct {
 	AvgTTFTMs                 float64 `json:"avg_ttft_ms"`
 	LastTTFTMs                float64 `json:"last_ttft_ms"`
 	TotalGenerationDurationMs float64 `json:"total_generation_duration_ms"`
+	TotalClientDurationMs     float64 `json:"total_client_duration_ms"`
 	TPS                       float64 `json:"tps"`
+	ClientTPS                 float64 `json:"client_tps"`
 }
 
 type modelAccumulator struct {
 	mu                        sync.Mutex
 	requests                  int64
 	totalTokens               int64
+	decodeTokens              int64
 	totalTTFTNs               int64
 	lastTTFTNs                int64
 	totalGenerationDurationNs int64
+	totalClientDurationNs     int64
 }
 
 type StreamMetrics struct {
@@ -205,10 +209,15 @@ func (m *StreamMetrics) Summary() string {
 	)
 }
 
-func (m *StreamMetrics) RecordModelMetrics(model string, tokens int64, ttft time.Duration, genDuration time.Duration) {
+func (m *StreamMetrics) RecordModelMetrics(model string, tokens int64, ttft time.Duration, upstreamGenDuration time.Duration, clientDurations ...time.Duration) {
 	if model == "" {
 		model = "unknown"
 	}
+	clientGenDuration := upstreamGenDuration
+	if len(clientDurations) > 0 {
+		clientGenDuration = clientDurations[0]
+	}
+
 	m.modelsMu.Lock()
 	if m.models == nil {
 		m.models = make(map[string]*modelAccumulator)
@@ -224,9 +233,15 @@ func (m *StreamMetrics) RecordModelMetrics(model string, tokens int64, ttft time
 	defer acc.mu.Unlock()
 	acc.requests++
 	acc.totalTokens += tokens
+	if tokens > 1 {
+		acc.decodeTokens += (tokens - 1)
+	} else {
+		acc.decodeTokens += tokens
+	}
 	acc.totalTTFTNs += ttft.Nanoseconds()
 	acc.lastTTFTNs = ttft.Nanoseconds()
-	acc.totalGenerationDurationNs += genDuration.Nanoseconds()
+	acc.totalGenerationDurationNs += upstreamGenDuration.Nanoseconds()
+	acc.totalClientDurationNs += clientGenDuration.Nanoseconds()
 }
 
 func (m *StreamMetrics) ModelSnapshots() map[string]ModelMetricSnapshot {
@@ -242,9 +257,11 @@ func (m *StreamMetrics) ModelSnapshots() map[string]ModelMetricSnapshot {
 		acc.mu.Lock()
 		reqs := acc.requests
 		tokens := acc.totalTokens
+		decTokens := acc.decodeTokens
 		ttftNs := acc.totalTTFTNs
 		lastTtftNs := acc.lastTTFTNs
 		genNs := acc.totalGenerationDurationNs
+		clientNs := acc.totalClientDurationNs
 		acc.mu.Unlock()
 
 		snap := ModelMetricSnapshot{
@@ -252,15 +269,30 @@ func (m *StreamMetrics) ModelSnapshots() map[string]ModelMetricSnapshot {
 			TotalTokens:               tokens,
 			LastTTFTMs:                float64(lastTtftNs) / 1e6,
 			TotalGenerationDurationMs: float64(genNs) / 1e6,
+			TotalClientDurationMs:     float64(clientNs) / 1e6,
 		}
 		if reqs > 0 {
 			snap.AvgTTFTMs = float64(ttftNs) / float64(reqs) / 1e6
 		}
+
+		// 上游模型推理 Decode TPS：使用生成阶段生成的 decodeTokens 与 upstream 耗时
 		if genNs > 0 {
-			snap.TPS = float64(tokens) / (float64(genNs) / 1e9)
+			if decTokens > 0 {
+				snap.TPS = float64(decTokens) / (float64(genNs) / 1e9)
+			} else {
+				snap.TPS = float64(tokens) / (float64(genNs) / 1e9)
+			}
 		} else if reqs > 0 && ttftNs > 0 {
 			snap.TPS = float64(tokens) / (float64(ttftNs) / 1e9)
 		}
+
+		// 客户端实际感知输出 TPS
+		if clientNs > 0 {
+			snap.ClientTPS = float64(tokens) / (float64(clientNs) / 1e9)
+		} else if snap.TPS > 0 {
+			snap.ClientTPS = snap.TPS
+		}
+
 		result[name] = snap
 	}
 	return result

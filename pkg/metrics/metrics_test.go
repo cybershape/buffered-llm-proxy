@@ -9,8 +9,8 @@ import (
 func TestRecordModelMetrics(t *testing.T) {
 	m := &StreamMetrics{}
 
-	m.RecordModelMetrics("gpt-4o", 100, 200*time.Millisecond, 2*time.Second)
-	m.RecordModelMetrics("gpt-4o", 200, 400*time.Millisecond, 4*time.Second)
+	m.RecordModelMetrics("gpt-4o", 101, 200*time.Millisecond, 1*time.Second, 2*time.Second)
+	m.RecordModelMetrics("gpt-4o", 201, 400*time.Millisecond, 2*time.Second, 4*time.Second)
 
 	snaps := m.ModelSnapshots()
 	gpt4o, ok := snaps["gpt-4o"]
@@ -21,8 +21,8 @@ func TestRecordModelMetrics(t *testing.T) {
 	if gpt4o.Requests != 2 {
 		t.Errorf("expected 2 requests, got %d", gpt4o.Requests)
 	}
-	if gpt4o.TotalTokens != 300 {
-		t.Errorf("expected 300 tokens, got %d", gpt4o.TotalTokens)
+	if gpt4o.TotalTokens != 302 {
+		t.Errorf("expected 302 tokens, got %d", gpt4o.TotalTokens)
 	}
 	// Avg TTFT = (200ms + 400ms)/2 = 300ms
 	if gpt4o.AvgTTFTMs != 300.0 {
@@ -31,9 +31,13 @@ func TestRecordModelMetrics(t *testing.T) {
 	if gpt4o.LastTTFTMs != 400.0 {
 		t.Errorf("expected last TTFT 400ms, got %f", gpt4o.LastTTFTMs)
 	}
-	// Total gen duration = 6s, tokens = 300 -> TPS = 50.0
-	if gpt4o.TPS != 50.0 {
-		t.Errorf("expected TPS 50.0, got %f", gpt4o.TPS)
+	// Decode tokens = 100 + 200 = 300, upstream gen duration = 3s -> TPS = 100.0
+	if gpt4o.TPS != 100.0 {
+		t.Errorf("expected Decode TPS 100.0, got %f", gpt4o.TPS)
+	}
+	// Client duration = 6s, tokens = 302 -> ClientTPS = 302 / 6 = ~50.33
+	if gpt4o.ClientTPS < 50.0 || gpt4o.ClientTPS > 51.0 {
+		t.Errorf("expected ClientTPS ~50.33, got %f", gpt4o.ClientTPS)
 	}
 }
 
