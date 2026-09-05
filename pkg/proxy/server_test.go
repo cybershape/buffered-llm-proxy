@@ -87,8 +87,8 @@ func TestProxyModelsContextWindowAndUserAgent(t *testing.T) {
 	if m1["context_window"] != float64(128000) {
 		t.Fatalf("expected context_window 128000, got %v", m1["context_window"])
 	}
-	if m1["content_length"] != float64(128000) {
-		t.Fatalf("expected content_length 128000, got %v", m1["content_length"])
+	if m1["context_length"] != float64(128000) {
+		t.Fatalf("expected context_length 128000, got %v", m1["context_length"])
 	}
 
 	m2 := dataList[1].(map[string]interface{})
@@ -96,8 +96,8 @@ func TestProxyModelsContextWindowAndUserAgent(t *testing.T) {
 	if extra["context_window"] != float64(32768) {
 		t.Fatalf("expected extra.context_window 32768, got %v", extra["context_window"])
 	}
-	if extra["content_length"] != float64(32768) {
-		t.Fatalf("expected extra.content_length 32768, got %v", extra["content_length"])
+	if extra["context_length"] != float64(32768) {
+		t.Fatalf("expected extra.context_length 32768, got %v", extra["context_length"])
 	}
 }
 

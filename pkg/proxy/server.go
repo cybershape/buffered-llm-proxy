@@ -258,7 +258,7 @@ func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode == http.StatusOK && strings.Contains(cType, "application/json") {
 		var root interface{}
 		if json.Unmarshal(bodyBytes, &root) == nil {
-			if injectContentLength(root) {
+			if injectContextLength(root) {
 				if modified, encErr := json.Marshal(root); encErr == nil {
 					bodyBytes = modified
 				}
@@ -272,22 +272,22 @@ func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(bodyBytes)
 }
 
-func injectContentLength(v interface{}) bool {
+func injectContextLength(v interface{}) bool {
 	modified := false
 	switch val := v.(type) {
 	case map[string]interface{}:
 		if cw, exists := val["context_window"]; exists {
-			val["content_length"] = cw
+			val["context_length"] = cw
 			modified = true
 		}
 		for _, item := range val {
-			if injectContentLength(item) {
+			if injectContextLength(item) {
 				modified = true
 			}
 		}
 	case []interface{}:
 		for _, item := range val {
-			if injectContentLength(item) {
+			if injectContextLength(item) {
 				modified = true
 			}
 		}
