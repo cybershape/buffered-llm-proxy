@@ -202,12 +202,11 @@
                                 <th title="上游模型真实推理速率 (Decode TPS)">推理 TPS</th>
                                 <th title="客户端实际感知吞吐速率">客户端 TPS</th>
                                 <th title="累计生成 Token 总数">总 Tokens</th>
-                                <th title="上游生成累计总耗时">生成耗时</th>
                             </tr>
                         </thead>
                         <tbody id="models-table-body">
                             <tr>
-                                <td colspan="8" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td>
+                                <td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td>
                             </tr>
                         </tbody>
                     </table>
@@ -467,7 +466,7 @@
             }
 
             if (modelKeys.length === 0) {
-                modelsTbody.innerHTML = '<tr><td colspan="8" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td></tr>';
+                modelsTbody.innerHTML = '<tr><td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td></tr>';
             } else {
                 let rowsHtml = '';
                 modelKeys.sort().forEach(modelName => {
@@ -476,7 +475,6 @@
                     const clientTps = m.client_tps !== undefined ? m.client_tps.toFixed(2) : '0.00';
                     const avgTtft = m.avg_ttft_ms !== undefined ? formatDurationMs(m.avg_ttft_ms) : '-';
                     const lastTtft = m.last_ttft_ms !== undefined ? formatDurationMs(m.last_ttft_ms) : '-';
-                    const genDur = m.total_generation_duration_ms !== undefined ? formatDurationMs(m.total_generation_duration_ms) : '-';
                     const totalTokensRaw = m.total_tokens || 0;
                     const compactTokens = formatCompactNumber(totalTokensRaw);
                     const requestsRaw = m.requests || 0;
@@ -491,7 +489,6 @@
                             <td class="font-mono"><strong class="has-text-success">${decodeTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
                             <td class="font-mono"><strong class="has-text-link">${clientTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
                             <td class="font-mono"><span class="has-text-weight-semibold" title="${totalTokensRaw.toLocaleString()} Tokens">${compactTokens}</span></td>
-                            <td class="font-mono"><span title="${((m.total_generation_duration_ms || 0) / 1000).toFixed(2)}s">${genDur}</span></td>
                         </tr>
                     `;
                 });
