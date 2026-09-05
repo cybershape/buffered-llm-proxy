@@ -128,3 +128,96 @@ func TestPendingBufferHighWatermarkContextCancel(t *testing.T) {
 		t.Fatalf("Append remained hung after context cancellation")
 	}
 }
+
+func TestPendingBufferMinCoalesceWaitBarrierBypass(t *testing.T) {
+	pb := NewPendingBuffer(BufferConfig{
+		HighWatermark:   1024 * 1024,
+		LowWatermark:    512 * 1024,
+		MinCoalesceWait: 500 * time.Millisecond,
+	}, nil)
+
+	ctx := context.Background()
+	// Append reasoning segment
+	_ = pb.Append(ctx, &semantic.ReasoningSegment{ChoiceIndex: 0, FieldName: "reasoning", Text: "thinking..."})
+	// Append content segment - this creates a barrier transition
+	_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "Hello"})
+
+	start := time.Now()
+	snap, _, err := pb.Swap(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 segments in snapshot, got %d", len(snap))
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("expected swap to bypass MinCoalesceWait due to barrier, took %v", elapsed)
+	}
+}
+
+func TestPendingBufferMinCoalesceWaitInterruptedByBarrier(t *testing.T) {
+	pb := NewPendingBuffer(BufferConfig{
+		HighWatermark:   1024 * 1024,
+		LowWatermark:    512 * 1024,
+		MinCoalesceWait: 500 * time.Millisecond,
+	}, nil)
+
+	ctx := context.Background()
+	_ = pb.Append(ctx, &semantic.ReasoningSegment{ChoiceIndex: 0, FieldName: "reasoning", Text: "thinking..."})
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		// Arrival of content creates a barrier transition while Swap is waiting
+		_ = pb.Append(ctx, &semantic.ContentSegment{ChoiceIndex: 0, Text: "Hello"})
+	}()
+
+	start := time.Now()
+	snap, _, err := pb.Swap(ctx)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 segments in snapshot, got %d", len(snap))
+	}
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("expected swap to be interrupted quickly, took %v", elapsed)
+	}
+}
+
+func TestPendingBufferNonCoalesceableSegmentBypassesWait(t *testing.T) {
+	nonCoalesceableSegs := []semantic.Segment{
+		&semantic.RoleSegment{ChoiceIndex: 0, Role: "assistant"},
+		&semantic.FinishSegment{ChoiceIndex: 0, FinishReason: "stop"},
+		&semantic.UsageSegment{Usage: map[string]int{"total_tokens": 10}},
+		&semantic.RawSegment{SegmentType: semantic.EventDone, Data: []byte("[DONE]")},
+	}
+
+	for _, seg := range nonCoalesceableSegs {
+		pb := NewPendingBuffer(BufferConfig{
+			HighWatermark:   1024 * 1024,
+			LowWatermark:    512 * 1024,
+			MinCoalesceWait: 500 * time.Millisecond,
+		}, nil)
+
+		ctx := context.Background()
+		_ = pb.Append(ctx, seg)
+
+		start := time.Now()
+		snap, _, err := pb.Swap(ctx)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if len(snap) != 1 {
+			t.Fatalf("expected 1 segment in snapshot, got %d", len(snap))
+		}
+		if elapsed >= 200*time.Millisecond {
+			t.Fatalf("segment type %v should bypass min coalesce wait, took %v", seg.Type(), elapsed)
+		}
+	}
+}

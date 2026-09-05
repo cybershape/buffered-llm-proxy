@@ -33,6 +33,8 @@ type PendingBuffer struct {
 	mu              sync.Mutex
 	notEmpty        *sync.Cond
 	belowHighWater  *sync.Cond
+	barrierWake     chan struct{}
+	hasBarrier      bool
 	segments        []semantic.Segment
 	currentBytes    int64
 	highWatermark   int64
@@ -55,6 +57,7 @@ func NewPendingBuffer(cfg BufferConfig, m *metrics.StreamMetrics) *PendingBuffer
 		lowWatermark:    cfg.LowWatermark,
 		minCoalesceWait: cfg.MinCoalesceWait,
 		metrics:         m,
+		barrierWake:     make(chan struct{}),
 	}
 	pb.notEmpty = sync.NewCond(&pb.mu)
 	pb.belowHighWater = sync.NewCond(&pb.mu)
@@ -102,6 +105,14 @@ func (b *PendingBuffer) Append(ctx context.Context, seg semantic.Segment) error 
 			b.notEmpty.Signal()
 			return nil
 		}
+		// Cannot merge with previous segment: this is a barrier transition.
+		b.notifyBarrierLocked()
+	}
+
+	// Non-streaming-body segments (role, finish, usage, done, error, raw)
+	// should never cause downstream coalesce waiting.
+	if !isCoalesceableSegment(seg) {
+		b.notifyBarrierLocked()
 	}
 
 	b.segments = append(b.segments, seg)
@@ -129,15 +140,40 @@ func (b *PendingBuffer) Swap(ctx context.Context) ([]semantic.Segment, bool, err
 		return nil, b.closed, b.upstreamErr
 	}
 
-	if b.minCoalesceWait > 0 {
+	if b.minCoalesceWait > 0 && !b.hasBarrier && !b.closed && b.upstreamErr == nil {
+		wakeCh := b.barrierWake
+		waitTimer := time.NewTimer(b.minCoalesceWait)
 		b.mu.Unlock()
-		time.Sleep(b.minCoalesceWait)
+
+		select {
+		case <-waitTimer.C:
+		case <-wakeCh:
+			if !waitTimer.Stop() {
+				select {
+				case <-waitTimer.C:
+				default:
+				}
+			}
+		case <-ctx.Done():
+			if !waitTimer.Stop() {
+				select {
+				case <-waitTimer.C:
+				default:
+				}
+			}
+		}
+
 		b.mu.Lock()
+	}
+
+	if ctx.Err() != nil && len(b.segments) == 0 {
+		return nil, b.closed, ctx.Err()
 	}
 
 	snapshot := b.segments
 	b.segments = nil
 	b.currentBytes = 0
+	b.resetBarrierLocked()
 
 	if b.metrics != nil {
 		b.metrics.SetPendingBytes(0)
@@ -145,6 +181,29 @@ func (b *PendingBuffer) Swap(ctx context.Context) ([]semantic.Segment, bool, err
 	b.belowHighWater.Broadcast()
 
 	return snapshot, b.closed, b.upstreamErr
+}
+
+func (b *PendingBuffer) notifyBarrierLocked() {
+	if !b.hasBarrier {
+		b.hasBarrier = true
+		close(b.barrierWake)
+	}
+}
+
+func (b *PendingBuffer) resetBarrierLocked() {
+	if b.hasBarrier {
+		b.hasBarrier = false
+		b.barrierWake = make(chan struct{})
+	}
+}
+
+func isCoalesceableSegment(seg semantic.Segment) bool {
+	switch seg.Type() {
+	case semantic.EventReasoning, semantic.EventContent, semantic.EventToolCall:
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *PendingBuffer) Close(err error) {
@@ -156,6 +215,7 @@ func (b *PendingBuffer) Close(err error) {
 	}
 	b.closed = true
 	b.upstreamErr = err
+	b.notifyBarrierLocked()
 	b.notEmpty.Broadcast()
 	b.belowHighWater.Broadcast()
 }
