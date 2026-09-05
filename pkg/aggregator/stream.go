@@ -38,6 +38,9 @@ func NewStreamPipeline(cfg BufferConfig, m *metrics.StreamMetrics) *StreamPipeli
 func (p *StreamPipeline) SetRequestInfo(model string, startTime time.Time) {
 	p.initialModel = model
 	p.startTime = startTime
+	if !startTime.IsZero() && p.parser != nil {
+		p.parser.SetStartTime(startTime)
+	}
 }
 
 func extractCompletionTokens(usage interface{}) int64 {

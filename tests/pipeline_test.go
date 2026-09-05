@@ -526,3 +526,54 @@ func TestDuplicateRoleStreamDoesNotBreakCoalescing(t *testing.T) {
 		t.Fatalf("expected concatenated content %q, got %q", expectedConcat, allContent.String())
 	}
 }
+
+func TestPipelineChunkWithoutCreatedGetsTimestamp(t *testing.T) {
+	var inSSE bytes.Buffer
+	inSSE.WriteString("data: {\"id\":\"FBGcati3GsG6mtkP4v7lmQM\",\"object\":\"chat.completion.chunk\",\"model\":\"gemini-3.8-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+	inSSE.WriteString("data: {\"id\":\"FBGcati3GsG6mtkP4v7lmQM\",\"object\":\"chat.completion.chunk\",\"model\":\"gemini-3.8-flash\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n")
+	inSSE.WriteString("data: [DONE]\n\n")
+
+	downstream := &slowDownstreamWriter{}
+	m := &metrics.StreamMetrics{}
+	pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), m)
+	reqStartTime := time.Now()
+	pipeline.SetRequestInfo("gemini-3.8-flash", reqStartTime)
+
+	if err := pipeline.ProcessStream(context.Background(), io.NopCloser(&inSSE), downstream); err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	r := sse.NewReader(bytes.NewReader(downstream.Bytes()))
+	chunksChecked := 0
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if string(ev.Data) == "[DONE]" {
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal(ev.Data, &chunk); err != nil {
+			t.Fatalf("failed to unmarshal chunk: %v", err)
+		}
+		createdVal, hasCreated := chunk["created"]
+		if !hasCreated {
+			t.Fatalf("chunk missing 'created': %s", string(ev.Data))
+		}
+		cFloat, ok := createdVal.(float64)
+		if !ok || int64(cFloat) <= 0 {
+			t.Fatalf("invalid created timestamp: %v", createdVal)
+		}
+		if chunk["model"] != "gemini-3.8-flash" {
+			t.Fatalf("unexpected model: %v", chunk["model"])
+		}
+		chunksChecked++
+	}
+	if chunksChecked == 0 {
+		t.Fatalf("expected at least 1 chunk checked")
+	}
+}

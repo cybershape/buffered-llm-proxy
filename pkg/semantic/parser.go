@@ -3,6 +3,8 @@ package semantic
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
+	"time"
 
 	"buffered-proxy/pkg/sse"
 )
@@ -14,7 +16,16 @@ type Parser struct {
 
 func NewParser() *Parser {
 	return &Parser{
+		meta: CommonMetadata{
+			Created: time.Now().Unix(),
+		},
 		seenRoles: make(map[int]string),
+	}
+}
+
+func (p *Parser) SetStartTime(t time.Time) {
+	if !t.IsZero() {
+		p.meta.Created = t.Unix()
 	}
 }
 
@@ -109,6 +120,18 @@ func (p *Parser) extractMetadata(rootMap map[string]json.RawMessage) {
 		var c int64
 		if json.Unmarshal(raw, &c) == nil && c != 0 {
 			p.meta.Created = c
+		} else {
+			var f float64
+			if json.Unmarshal(raw, &f) == nil && f != 0 {
+				p.meta.Created = int64(f)
+			} else {
+				var s string
+				if json.Unmarshal(raw, &s) == nil && s != "" {
+					if parsedInt, err := strconv.ParseInt(s, 10, 64); err == nil && parsedInt != 0 {
+						p.meta.Created = parsedInt
+					}
+				}
+			}
 		}
 	}
 	if raw, ok := rootMap["model"]; ok {

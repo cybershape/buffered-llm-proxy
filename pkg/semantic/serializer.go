@@ -2,6 +2,7 @@ package semantic
 
 import (
 	"encoding/json"
+	"time"
 
 	"buffered-proxy/pkg/sse"
 )
@@ -45,6 +46,8 @@ func (s *Serializer) baseMap(meta CommonMetadata) map[string]interface{} {
 	}
 	if meta.Created != 0 {
 		m["created"] = meta.Created
+	} else {
+		m["created"] = time.Now().Unix()
 	}
 	if meta.Model != "" {
 		m["model"] = meta.Model

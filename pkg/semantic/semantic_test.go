@@ -239,3 +239,62 @@ func TestDuplicateRoleIgnoredAndNotBarrier(t *testing.T) {
 		t.Fatalf("identical role segments should be mergeable/absorbable")
 	}
 }
+
+func TestCreatedTimestampHandling(t *testing.T) {
+	p := NewParser()
+	s := NewSerializer()
+
+	// 1. Upstream chunk lacking "created" (e.g. Gemini)
+	evNoCreated := &sse.Event{
+		Data: []byte(`{"id":"FBGcati3GsG6mtkP4v7lmQM","object":"chat.completion.chunk","model":"gemini-3.8-flash","choices":[{"index":0,"delta":{"content":"Hello"}}]}`),
+	}
+	segs, err := p.ParseEvent(evNoCreated)
+	if err != nil || len(segs) != 1 {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	out := s.SerializeSegment(segs[0])
+	payload := strings.TrimPrefix(strings.TrimSpace(string(out)), "data: ")
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	createdVal, ok := parsed["created"]
+	if !ok {
+		t.Fatalf("expected 'created' field in output, but missing: %s", payload)
+	}
+	createdFloat, ok := createdVal.(float64)
+	if !ok || int64(createdFloat) <= 0 {
+		t.Fatalf("expected positive integer timestamp for 'created', got: %v", createdVal)
+	}
+
+	// 2. Upstream chunk with explicit "created"
+	pWithCreated := NewParser()
+	evWithCreated := &sse.Event{
+		Data: []byte(`{"id":"chat-123","created":1741234567,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hi"}}]}`),
+	}
+	segs2, err := pWithCreated.ParseEvent(evWithCreated)
+	if err != nil || len(segs2) != 1 {
+		t.Fatalf("parse failed: %v", err)
+	}
+	out2 := s.SerializeSegment(segs2[0])
+	var parsed2 map[string]interface{}
+	_ = json.Unmarshal([]byte(strings.TrimPrefix(strings.TrimSpace(string(out2)), "data: ")), &parsed2)
+	if int64(parsed2["created"].(float64)) != 1741234567 {
+		t.Fatalf("expected preserved created timestamp 1741234567, got %v", parsed2["created"])
+	}
+
+	// 3. Fallback when segment Metadata has Created: 0
+	bareSeg := &ContentSegment{
+		ChoiceIndex: 0,
+		Text:        "bare",
+		Metadata:    CommonMetadata{ID: "bare-id"},
+	}
+	out3 := s.SerializeSegment(bareSeg)
+	var parsed3 map[string]interface{}
+	_ = json.Unmarshal([]byte(strings.TrimPrefix(strings.TrimSpace(string(out3)), "data: ")), &parsed3)
+	if int64(parsed3["created"].(float64)) <= 0 {
+		t.Fatalf("expected fallback unix timestamp for bare segment, got %v", parsed3["created"])
+	}
+}
