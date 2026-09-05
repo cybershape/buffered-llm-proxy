@@ -34,9 +34,21 @@
         .stat-number {
             font-size: 1.5rem;
             font-weight: 700;
+            white-space: nowrap !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
-        /* 统一卡片等高与垂直对齐样式 */
+        /* 表格全局禁止折行且垂直居中，数字过大时不换行 */
+        .table th, .table td {
+            white-space: nowrap !important;
+            vertical-align: middle !important;
+        }
+        .is-nowrap {
+            white-space: nowrap !important;
+        }
+
+        /* 统一卡片等高与垂直对齐样式，全局彻底禁止折行 */
         .stat-box, .config-box {
             height: 100%;
             display: flex;
@@ -44,9 +56,12 @@
             justify-content: space-between;
         }
         .stat-box .heading, .config-box .heading {
-            min-height: 2.6rem;
-            margin-bottom: 0.25rem !important;
-            line-height: 1.35;
+            white-space: nowrap !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-height: 1.3rem;
+            margin-bottom: 0.35rem !important;
+            line-height: 1.3;
         }
         .stat-box .stat-number {
             margin-bottom: 0.25rem !important;
@@ -55,13 +70,18 @@
         .config-box .title {
             margin-bottom: 0.25rem !important;
             margin-top: 0.25rem !important;
+            white-space: nowrap !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .stat-box .help, .config-box .help {
-            min-height: 2.2rem;
+            min-height: 1.4rem;
             margin-top: auto;
-            line-height: 1.3;
-            display: flex;
-            align-items: center;
+            line-height: 1.4;
+            white-space: nowrap !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
         }
     </style>
 </head>
@@ -114,42 +134,42 @@
                 <div class="columns is-multiline">
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">上游目标地址 (Upstream URL)</p>
-                            <p class="title is-6 has-text-info font-mono mb-2" id="cfg-upstream" style="word-break: break-all;">-</p>
+                            <p class="heading has-text-grey mb-1" title="Upstream URL">上游目标地址</p>
+                            <p class="title is-6 has-text-info font-mono mb-2" id="cfg-upstream">-</p>
                             <p class="help has-text-grey">下游请求转发目标地址</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">高水位限制 (Max Buffer / High Watermark)</p>
+                            <p class="heading has-text-grey mb-1" title="Max Buffer / High Watermark">高水位限制</p>
                             <p class="title is-5 font-mono mb-2" id="cfg-high-water">-</p>
                             <p class="help has-text-grey font-mono" id="cfg-high-water-bytes">-</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">低水位释放线 (Low Watermark)</p>
+                            <p class="heading has-text-grey mb-1" title="Low Watermark">低水位释放线</p>
                             <p class="title is-5 font-mono mb-2" id="cfg-low-water">-</p>
                             <p class="help has-text-grey font-mono" id="cfg-low-water-bytes">-</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">协同聚合延迟 (Min Coalesce Wait)</p>
+                            <p class="heading has-text-grey mb-1" title="Min Coalesce Wait">协同聚合延迟</p>
                             <p class="title is-5 font-mono mb-2" id="cfg-coalesce-ms">-</p>
                             <p class="help has-text-grey">流控等待时延窗口</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">网络响应压缩 (Response Compression)</p>
+                            <p class="heading has-text-grey mb-1" title="Response Compression">网络响应压缩</p>
                             <div class="mb-2" id="cfg-compression">-</div>
                             <p class="help has-text-grey">gzip, zstd 自适应压缩</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box config-box">
-                            <p class="heading has-text-grey mb-1">指标监控接口 (Metrics &amp; Dashboard)</p>
+                            <p class="heading has-text-grey mb-1" title="Metrics & Dashboard">指标监控接口</p>
                             <div class="mb-2" id="cfg-metrics-api">-</div>
                             <p class="help has-text-grey">/metrics &amp; /dashboard</p>
                         </div>
@@ -175,14 +195,14 @@
                     <table class="table is-fullwidth is-striped is-hoverable mb-0">
                         <thead>
                             <tr>
-                                <th>模型名称 (Model)</th>
-                                <th>请求总数</th>
-                                <th>平均首字耗时 (Avg TTFT)</th>
-                                <th>最近首字耗时 (Last TTFT)</th>
-                                <th>模型推理 (Decode TPS)</th>
-                                <th>客户端输出 (Client TPS)</th>
-                                <th>累计 Token 数</th>
-                                <th>上游生成耗时</th>
+                                <th title="模型名称">模型</th>
+                                <th title="请求总次数">请求数</th>
+                                <th title="平均首字延迟 (Time to First Token)">平均 TTFT</th>
+                                <th title="最近一次首字延迟">最近 TTFT</th>
+                                <th title="上游模型真实推理速率 (Decode TPS)">推理 TPS</th>
+                                <th title="客户端实际感知吞吐速率">客户端 TPS</th>
+                                <th title="累计生成 Token 总数">总 Tokens</th>
+                                <th title="上游生成累计总耗时">生成耗时</th>
                             </tr>
                         </thead>
                         <tbody id="models-table-body">
@@ -207,28 +227,28 @@
                 <div class="columns is-multiline">
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">整体事件合并比 (Overall Ratio)</p>
+                            <p class="heading has-text-grey mb-1" title="Overall Coalescing Ratio">整体事件合并比</p>
                             <p class="stat-number has-text-info font-mono mb-2" id="metric-overall-ratio">0.00:1</p>
                             <p class="help has-text-grey font-mono" id="metric-overall-detail">In: 0 / Out: 0</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">推理流合并比 (Reasoning Ratio)</p>
+                            <p class="heading has-text-grey mb-1" title="Reasoning Coalescing Ratio">推理流合并比</p>
                             <p class="stat-number font-mono mb-2" id="metric-reasoning-ratio">0.00:1</p>
                             <p class="help has-text-grey font-mono" id="metric-reasoning-detail">In: 0 / Out: 0</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">正文流合并比 (Content Ratio)</p>
+                            <p class="heading has-text-grey mb-1" title="Content Coalescing Ratio">正文流合并比</p>
                             <p class="stat-number font-mono mb-2" id="metric-content-ratio">0.00:1</p>
                             <p class="help has-text-grey font-mono" id="metric-content-detail">In: 0 / Out: 0</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">工具调用合并比 (Tool Ratio)</p>
+                            <p class="heading has-text-grey mb-1" title="Tool Coalescing Ratio">工具调用合并比</p>
                             <p class="stat-number font-mono mb-2" id="metric-tool-ratio">0.00:1</p>
                             <p class="help has-text-grey font-mono" id="metric-tool-detail">In: 0 / Out: 0</p>
                         </div>
@@ -249,28 +269,28 @@
                 <div class="columns is-multiline">
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">上游接收流量 (Upstream Traffic)</p>
+                            <p class="heading has-text-grey mb-1" title="Upstream Traffic">上游接收流量</p>
                             <p class="stat-number font-mono mb-2" id="metric-upstream-bytes">0 B</p>
                             <p class="help has-text-grey font-mono" id="metric-upstream-raw">0 字节</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">下游发送流量 (Downstream Traffic)</p>
+                            <p class="heading has-text-grey mb-1" title="Downstream Traffic">下游发送流量</p>
                             <p class="stat-number font-mono mb-2" id="metric-downstream-bytes">0 B</p>
                             <p class="help has-text-grey font-mono" id="metric-downstream-raw">0 字节</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">数据压缩比率 (Compression Ratio)</p>
+                            <p class="heading has-text-grey mb-1" title="Compression Ratio">数据压缩比率</p>
                             <p class="stat-number font-mono mb-2" id="metric-compression-ratio">0.00:1</p>
                             <p class="help has-text-grey font-mono" id="metric-compression-bytes">原始: 0 B / 压缩: 0 B</p>
                         </div>
                     </div>
                     <div class="column is-3">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">带宽节省率 (Savings Percent)</p>
+                            <p class="heading has-text-grey mb-1" title="Savings Percent">带宽节省率</p>
                             <p class="stat-number has-text-success font-mono mb-2" id="metric-savings-percent">0.00%</p>
                             <p class="help has-text-grey font-mono" id="metric-savings-ratio">比率: 0.0000</p>
                         </div>
@@ -291,23 +311,23 @@
                 <div class="columns is-multiline">
                     <div class="column is-4">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">待发送缓冲峰值 (Pending Bytes Max)</p>
+                            <p class="heading has-text-grey mb-1" title="Pending Bytes Max">待发缓冲峰值</p>
                             <p class="stat-number font-mono mb-2" id="metric-pending-max">0 B</p>
                             <p class="help has-text-grey font-mono" id="metric-pending-raw">0 字节</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">读取流控暂停次数 (Reader Pauses)</p>
+                            <p class="heading has-text-grey mb-1" title="Reader Pauses">读取流控暂停</p>
                             <p class="stat-number font-mono mb-2" id="metric-reader-pauses">0 次</p>
                             <p class="help has-text-grey font-mono" id="metric-pause-duration">累计暂停: 0 ms</p>
                         </div>
                     </div>
                     <div class="column is-4">
                         <div class="box stat-box">
-                            <p class="heading has-text-grey mb-1">下游网络写入耗时 (Downstream Write Duration)</p>
+                            <p class="heading has-text-grey mb-1" title="Downstream Write Duration">下游写入耗时</p>
                             <p class="stat-number font-mono mb-2" id="metric-write-duration">0 ms</p>
-                            <p class="help has-text-grey">下游套接字写入累计时长</p>
+                            <p class="help has-text-grey" title="下游套接字写入累计时长">套接字写入耗时</p>
                         </div>
                     </div>
                 </div>
@@ -375,9 +395,24 @@
         }
 
         function formatDurationMs(ms) {
-            if (ms < 1) return ms.toFixed(2) + ' ms';
-            if (ms < 1000) return ms.toFixed(1) + ' ms';
-            return (ms / 1000).toFixed(2) + ' s';
+            if (ms === null || ms === undefined || isNaN(ms)) return '-';
+            if (ms < 1) return ms.toFixed(2) + 'ms';
+            if (ms < 1000) return ms.toFixed(1) + 'ms';
+            const sec = ms / 1000;
+            if (sec < 60) return sec.toFixed(2) + 's';
+            const min = Math.floor(sec / 60);
+            const remSec = (sec % 60).toFixed(1);
+            if (min < 60) return `${min}m ${remSec}s`;
+            const hours = (sec / 3600).toFixed(1);
+            return `${hours}h`;
+        }
+
+        function formatCompactNumber(n) {
+            if (n === null || n === undefined || isNaN(n)) return '0';
+            if (n < 10000) return n.toLocaleString();
+            if (n < 1000000) return (n / 1000).toFixed(1) + 'K';
+            if (n < 1000000000) return (n / 1000000).toFixed(2) + 'M';
+            return (n / 1000000000).toFixed(2) + 'B';
         }
 
         function formatDurationNs(ns) {
@@ -391,7 +426,9 @@
                 if (!cfgEl || !cfgEl.textContent.trim()) return;
                 const cfg = JSON.parse(cfgEl.textContent);
 
-                document.getElementById('cfg-upstream').textContent = cfg.upstream_url || '-';
+                const upEl = document.getElementById('cfg-upstream');
+                upEl.textContent = cfg.upstream_url || '-';
+                upEl.title = cfg.upstream_url || '-';
                 
                 const highMB = cfg.high_watermark_mb || Math.round(cfg.high_watermark_bytes / 1024 / 1024);
                 document.getElementById('cfg-high-water').textContent = highMB + ' MB';
@@ -440,17 +477,21 @@
                     const avgTtft = m.avg_ttft_ms !== undefined ? formatDurationMs(m.avg_ttft_ms) : '-';
                     const lastTtft = m.last_ttft_ms !== undefined ? formatDurationMs(m.last_ttft_ms) : '-';
                     const genDur = m.total_generation_duration_ms !== undefined ? formatDurationMs(m.total_generation_duration_ms) : '-';
+                    const totalTokensRaw = m.total_tokens || 0;
+                    const compactTokens = formatCompactNumber(totalTokensRaw);
+                    const requestsRaw = m.requests || 0;
+                    const compactRequests = formatCompactNumber(requestsRaw);
 
                     rowsHtml += `
                         <tr>
-                            <td><span class="tag is-info is-light font-mono has-text-weight-bold">${modelName}</span></td>
-                            <td class="font-mono">${(m.requests || 0).toLocaleString()}</td>
+                            <td><span class="tag is-info is-light font-mono has-text-weight-bold" style="max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle;" title="${modelName}">${modelName}</span></td>
+                            <td class="font-mono"><span title="${requestsRaw.toLocaleString()} 次请求">${compactRequests}</span></td>
                             <td class="font-mono"><strong class="has-text-info">${avgTtft}</strong></td>
                             <td class="font-mono">${lastTtft}</td>
-                            <td class="font-mono"><strong class="has-text-success">${decodeTps}</strong> <span class="is-size-7 has-text-grey">tok/s</span></td>
-                            <td class="font-mono"><strong class="has-text-link">${clientTps}</strong> <span class="is-size-7 has-text-grey">tok/s</span></td>
-                            <td class="font-mono">${(m.total_tokens || 0).toLocaleString()}</td>
-                            <td class="font-mono">${genDur}</td>
+                            <td class="font-mono"><strong class="has-text-success">${decodeTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
+                            <td class="font-mono"><strong class="has-text-link">${clientTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
+                            <td class="font-mono"><span class="has-text-weight-semibold" title="${totalTokensRaw.toLocaleString()} Tokens">${compactTokens}</span></td>
+                            <td class="font-mono"><span title="${((m.total_generation_duration_ms || 0) / 1000).toFixed(2)}s">${genDur}</span></td>
                         </tr>
                     `;
                 });
@@ -481,7 +522,9 @@
             document.getElementById('metric-compression-ratio').textContent = (data.compression_ratio || 0).toFixed(2) + ':1';
             const uncomp = data.compression_uncompressed_bytes || 0;
             const comp = data.compression_compressed_bytes || 0;
-            document.getElementById('metric-compression-bytes').textContent = `原始: ${formatBytes(uncomp)} / 压缩: ${formatBytes(comp)}`;
+            const compEl = document.getElementById('metric-compression-bytes');
+            compEl.textContent = `${formatBytes(uncomp)} → ${formatBytes(comp)}`;
+            compEl.title = `未压缩: ${formatBytes(uncomp)} (${uncomp.toLocaleString()} 字节) / 压缩后: ${formatBytes(comp)} (${comp.toLocaleString()} 字节)`;
 
             document.getElementById('metric-savings-percent').textContent = data.compression_savings_ratio_percent || '0.00%';
             document.getElementById('metric-savings-ratio').textContent = `比率: ${(data.compression_savings_ratio || 0).toFixed(4)}`;
