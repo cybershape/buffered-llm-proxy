@@ -14,6 +14,8 @@ import (
 	"buffered-proxy/pkg/sse"
 )
 
+type PacketCallback func(direction string, packetType string, data []byte)
+
 type StreamPipeline struct {
 	cfg          BufferConfig
 	metrics      *metrics.StreamMetrics
@@ -21,6 +23,7 @@ type StreamPipeline struct {
 	serializer   *semantic.Serializer
 	initialModel string
 	startTime    time.Time
+	packetCb     PacketCallback
 }
 
 func NewStreamPipeline(cfg BufferConfig, m *metrics.StreamMetrics) *StreamPipeline {
@@ -41,6 +44,10 @@ func (p *StreamPipeline) SetRequestInfo(model string, startTime time.Time) {
 	if !startTime.IsZero() && p.parser != nil {
 		p.parser.SetStartTime(startTime)
 	}
+}
+
+func (p *StreamPipeline) SetPacketCallback(cb PacketCallback) {
+	p.packetCb = cb
 }
 
 func extractCompletionTokens(usage interface{}) int64 {
@@ -217,6 +224,10 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 				out := p.serializer.SerializeSegment(seg)
 				if len(out) == 0 {
 					continue
+				}
+
+				if p.packetCb != nil {
+					p.packetCb("downstream", "downstream_chunk", out)
 				}
 
 				startWrite := time.Now()

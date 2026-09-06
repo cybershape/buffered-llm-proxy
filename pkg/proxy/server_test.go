@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -726,5 +727,194 @@ func TestProxyModelTTFTAndTPS(t *testing.T) {
 	}
 	if m.TPS <= 0 {
 		t.Errorf("expected TPS > 0, got %f", m.TPS)
+	}
+}
+
+func TestMonitorHub(t *testing.T) {
+	hub := NewMonitorHub()
+
+	if hub.HasSubscribers("gpt-4o") {
+		t.Fatalf("expected no subscribers initially")
+	}
+
+	ch1, unsub1 := hub.Subscribe("gpt-4o")
+	if !hub.HasSubscribers("gpt-4o") {
+		t.Fatalf("expected subscriber for gpt-4o")
+	}
+	if hub.HasSubscribers("claude-3") {
+		t.Fatalf("expected no subscriber for claude-3")
+	}
+
+	ch2, unsub2 := hub.Subscribe("claude-3")
+
+	hub.Broadcast(MonitorPacketEvent{
+		SessionID:  "sess_1",
+		Model:      "gpt-4o",
+		Direction:  DirectionUpstream,
+		PacketType: "request",
+		Payload:    `{"model":"gpt-4o"}`,
+	})
+
+	select {
+	case ev := <-ch1:
+		if ev.Model != "gpt-4o" || ev.Direction != DirectionUpstream {
+			t.Fatalf("unexpected ev received on ch1: %+v", ev)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for ch1 event")
+	}
+
+	select {
+	case ev := <-ch2:
+		t.Fatalf("ch2 should not receive gpt-4o event, got: %+v", ev)
+	default:
+	}
+
+	unsub1()
+	unsub2()
+
+	if hub.HasSubscribers("gpt-4o") || hub.HasSubscribers("claude-3") {
+		t.Fatalf("expected no subscribers after unsub")
+	}
+
+	_, ok := <-ch1
+	if ok {
+		t.Fatalf("ch1 should be closed after unsub")
+	}
+}
+
+func TestProxyServerMonitorStreamChat(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	chGpt, unsubGpt := proxySrv.MonitorHub().Subscribe("gpt-4o")
+	defer unsubGpt()
+
+	chClaude, unsubClaude := proxySrv.MonitorHub().Subscribe("claude-3")
+	defer unsubClaude()
+
+	chatReqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatReqBody))
+	rec := httptest.NewRecorder()
+
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var receivedEvents []MonitorPacketEvent
+collectLoop:
+	for {
+		select {
+		case ev := <-chGpt:
+			receivedEvents = append(receivedEvents, ev)
+			if ev.PacketType == "session_end" {
+				break collectLoop
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out collecting events, collected %d events", len(receivedEvents))
+		}
+	}
+
+	if len(receivedEvents) < 2 {
+		t.Fatalf("expected at least request, downstream chunk and session_end, got %d events", len(receivedEvents))
+	}
+
+	reqEv := receivedEvents[0]
+	if reqEv.Direction != DirectionUpstream || reqEv.PacketType != "request" {
+		t.Errorf("expected first event to be upstream request, got: %+v", reqEv)
+	}
+	if !strings.Contains(reqEv.Payload, `"gpt-4o"`) {
+		t.Errorf("expected payload to contain gpt-4o, got: %s", reqEv.Payload)
+	}
+
+	hasDownstream := false
+	hasContent := false
+	for _, ev := range receivedEvents[1:] {
+		if ev.Direction == DirectionDownstream && ev.PacketType == "downstream_chunk" {
+			hasDownstream = true
+			if strings.Contains(ev.Payload, "content") {
+				hasContent = true
+			}
+		}
+	}
+	if !hasDownstream {
+		t.Errorf("expected at least one downstream chunk")
+	}
+	if !hasContent {
+		t.Errorf("expected at least one downstream chunk containing content")
+	}
+
+	select {
+	case ev := <-chClaude:
+		t.Fatalf("chClaude should not have received any event, got: %+v", ev)
+	default:
+	}
+}
+
+func TestProxyServerMonitorHTTP_SSE(t *testing.T) {
+	proxySrv := NewProxyServer(ServerConfig{
+		AllowMetricsAPI: true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/monitor?model=gpt-4o", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	doneCh := make(chan struct{})
+	go func() {
+		proxySrv.ServeHTTP(rec, req)
+		close(doneCh)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	if !proxySrv.MonitorHub().HasSubscribers("gpt-4o") {
+		t.Fatalf("expected gpt-4o subscriber registered via HTTP /monitor")
+	}
+
+	proxySrv.MonitorHub().Broadcast(MonitorPacketEvent{
+		SessionID:   "sess_test_http",
+		Model:       "gpt-4o",
+		TimestampMs: time.Now().UnixMilli(),
+		Direction:   DirectionUpstream,
+		PacketType:  "request",
+		Payload:     `{"hello":"world"}`,
+	})
+
+	time.Sleep(30 * time.Millisecond)
+
+	cancel()
+
+	select {
+	case <-doneCh:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timed out waiting for monitor handler to exit on context cancellation")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "sess_test_http") || !strings.Contains(body, "upstream") {
+		t.Fatalf("expected SSE output to contain sess_test_http, got: %s", body)
 	}
 }

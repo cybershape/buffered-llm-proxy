@@ -83,6 +83,44 @@
             text-overflow: ellipsis;
             display: block;
         }
+
+        /* 实时监控弹窗与等宽 JSON 样式 */
+        .json-packet-pre {
+            font-size: 0.82rem;
+            line-height: 1.45;
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            max-height: 380px;
+            margin: 0.4rem 0 0.8rem 0;
+            white-space: pre;
+            word-break: normal;
+            word-wrap: normal;
+        }
+        html[data-theme="dark"] .json-packet-pre {
+            background-color: #181825 !important;
+            color: #cdd6f4 !important;
+            border: 1px solid #313244 !important;
+        }
+        html[data-theme="light"] .json-packet-pre {
+            background-color: #f6f8fa !important;
+            color: #24292f !important;
+            border: 1px solid #d0d7de !important;
+        }
+        .session-card {
+            border: 1px solid var(--bulma-border);
+            border-radius: 8px;
+            box-shadow: none !important;
+            margin-bottom: 1.25rem !important;
+            overflow: hidden;
+        }
+        .packet-item {
+            border-bottom: 1px dashed var(--bulma-border);
+            padding: 0.6rem 0;
+        }
+        .packet-item:last-child {
+            border-bottom: none;
+        }
     </style>
 </head>
 <body class="p-4 p-6-tablet">
@@ -202,11 +240,12 @@
                                 <th title="上游模型真实推理速率 (Decode TPS)">推理 TPS</th>
                                 <th title="客户端实际感知吞吐速率">客户端 TPS</th>
                                 <th title="累计生成 Token 总数">总 Tokens</th>
+                                <th class="has-text-centered" title="实时接收该模型正在收发的上下行数据包">实时监控</th>
                             </tr>
                         </thead>
                         <tbody id="models-table-body">
                             <tr>
-                                <td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td>
+                                <td colspan="8" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td>
                             </tr>
                         </tbody>
                     </table>
@@ -331,6 +370,60 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- 模型数据包实时监控模态对话框 (Modal) -->
+    <div class="modal" id="monitor-modal">
+        <div class="modal-background" onclick="closeMonitorModal()"></div>
+        <div class="modal-card" style="width: 95vw; max-width: 1350px; height: 92vh; max-height: 980px; display: flex; flex-direction: column;">
+            <header class="modal-card-head py-3 px-4">
+                <div class="modal-card-title is-size-5 is-flex is-align-items-center mb-0" style="overflow: hidden;">
+                    <span class="mr-2">📡</span>
+                    <span class="has-text-weight-bold">实时监控:</span>
+                    <span class="tag is-info font-mono ml-2 is-medium" id="monitor-model-title" style="max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</span>
+                    <span class="tag is-success is-light ml-3" id="monitor-conn-badge">
+                        <span class="status-dot"></span><span id="monitor-conn-status">监听连接中</span>
+                    </span>
+                </div>
+                <div class="is-flex is-align-items-center">
+                    <label class="checkbox is-size-7 mr-3 has-text-grey is-flex is-align-items-center" title="新数据包到达时自动滚动到底部">
+                        <input type="checkbox" id="monitor-auto-scroll" checked class="mr-1"> 自动滚动
+                    </label>
+                    <button class="button is-small is-warning is-light mr-2 font-mono" onclick="clearMonitorData()" title="清空当前接收到的数据包">清空数据</button>
+                    <button class="delete" aria-label="close" onclick="closeMonitorModal()"></button>
+                </div>
+            </header>
+            <section class="modal-card-body p-4" id="monitor-modal-body" style="flex: 1; overflow-y: auto;">
+                <!-- 顶部信息摘要条 -->
+                <div class="level is-mobile mb-3 px-3 py-2" style="background: var(--bulma-card-background-color, #fff); border: 1px solid var(--bulma-border); border-radius: 6px;">
+                    <div class="level-left">
+                        <div class="level-item is-size-7">
+                            <span class="mr-3">活跃会话: <strong class="has-text-info font-mono" id="monitor-sess-count">0</strong></span>
+                            <span>数据包: 上行请求 <strong class="has-text-link font-mono" id="monitor-up-count">0</strong> / 下游合并 <strong class="has-text-success font-mono" id="monitor-down-count">0</strong></span>
+                        </div>
+                    </div>
+                    <div class="level-right">
+                        <div class="level-item is-size-7 has-text-grey">
+                            <span>实时推流 · 无服务端存储 · 关闭后即消失</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 空状态等待提示 -->
+                <div id="monitor-empty-state" class="has-text-centered py-6">
+                    <p class="is-size-2 mb-2">⏳</p>
+                    <p class="has-text-weight-semibold is-size-6">正在实时监听此模型的数据包...</p>
+                    <p class="has-text-grey is-size-7 mt-1">当客户端发起调用时，上行请求包与下游合并后数据包将实时按会话分组呈现在此处</p>
+                </div>
+
+                <!-- 会话分组容器 -->
+                <div id="monitor-sessions-container"></div>
+            </section>
+            <footer class="modal-card-foot py-2 px-4 is-justify-content-space-between">
+                <span class="is-size-7 has-text-grey font-mono">按会话(连接)自动分组展示 · 等宽格式化 JSON · 区分上行与下行</span>
+                <button class="button is-small is-dark font-mono" onclick="closeMonitorModal()">关闭监控</button>
+            </footer>
         </div>
     </div>
 
@@ -466,7 +559,7 @@
             }
 
             if (modelKeys.length === 0) {
-                modelsTbody.innerHTML = '<tr><td colspan="7" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td></tr>';
+                modelsTbody.innerHTML = '<tr><td colspan="8" class="has-text-centered has-text-grey py-5">等待请求中... 暂无模型统计数据</td></tr>';
             } else {
                 let rowsHtml = '';
                 modelKeys.sort().forEach(modelName => {
@@ -482,13 +575,18 @@
 
                     rowsHtml += `
                         <tr>
-                            <td><span class="tag is-info is-light font-mono has-text-weight-bold" style="max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle;" title="${modelName}">${modelName}</span></td>
+                            <td><span class="tag is-info is-light font-mono has-text-weight-bold" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle;" title="${modelName}">${modelName}</span></td>
                             <td class="font-mono"><span title="${requestsRaw.toLocaleString()} 次请求">${compactRequests}</span></td>
                             <td class="font-mono"><strong class="has-text-info">${avgTtft}</strong></td>
                             <td class="font-mono">${lastTtft}</td>
                             <td class="font-mono"><strong class="has-text-success">${decodeTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
                             <td class="font-mono"><strong class="has-text-link">${clientTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
                             <td class="font-mono"><span class="has-text-weight-semibold" title="${totalTokensRaw.toLocaleString()} Tokens">${compactTokens}</span></td>
+                            <td class="has-text-centered">
+                                <button class="button is-small is-info is-light font-mono" onclick="openMonitorModal('${escapeHtml(modelName)}')">
+                                    <span>📡 实时监控</span>
+                                </button>
+                            </td>
                         </tr>
                     `;
                 });
@@ -579,6 +677,275 @@
                 }
             }, 1000);
         }
+
+        // ==================== 实时数据包监控逻辑 ====================
+        let monitorEventSource = null;
+        let currentMonitorModel = null;
+        let activeSessions = {};
+        let totalUpstreamPackets = 0;
+        let totalDownstreamPackets = 0;
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function formatJsonPayload(payload) {
+            if (!payload) return '';
+            const trimmed = payload.trim();
+            if (trimmed === '[DONE]') return '[DONE]';
+            try {
+                const parsed = JSON.parse(trimmed);
+                return JSON.stringify(parsed, null, 2);
+            } catch (e) {
+                return payload;
+            }
+        }
+
+        function formatTimeMs(ms) {
+            const d = new Date(ms || Date.now());
+            const h = String(d.getHours()).padStart(2, '0');
+            const m = String(d.getMinutes()).padStart(2, '0');
+            const s = String(d.getSeconds()).padStart(2, '0');
+            const millis = String(d.getMilliseconds()).padStart(3, '0');
+            return `${h}:${m}:${s}.${millis}`;
+        }
+
+        function copyPacketJson(btn) {
+            const pre = btn.closest('.packet-item')?.querySelector('pre code');
+            if (!pre) return;
+            navigator.clipboard.writeText(pre.textContent).then(() => {
+                const orig = btn.innerHTML;
+                btn.innerHTML = '已复制 ✔';
+                btn.classList.add('has-text-success');
+                setTimeout(() => {
+                    btn.innerHTML = orig;
+                    btn.classList.remove('has-text-success');
+                }, 1200);
+            }).catch(err => {
+                console.error('Copy failed:', err);
+            });
+        }
+
+        function toggleSessionCollapse(sessId) {
+            const sess = activeSessions[sessId];
+            if (!sess) return;
+            const content = sess.contentEl;
+            const toggleBtn = sess.toggleBtn;
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggleBtn.textContent = '折叠';
+            } else {
+                content.style.display = 'none';
+                toggleBtn.textContent = '展开';
+            }
+        }
+
+        function clearMonitorData() {
+            activeSessions = {};
+            totalUpstreamPackets = 0;
+            totalDownstreamPackets = 0;
+            const container = document.getElementById('monitor-sessions-container');
+            if (container) container.innerHTML = '';
+            const sessEl = document.getElementById('monitor-sess-count');
+            if (sessEl) sessEl.textContent = '0';
+            const upEl = document.getElementById('monitor-up-count');
+            if (upEl) upEl.textContent = '0';
+            const downEl = document.getElementById('monitor-down-count');
+            if (downEl) downEl.textContent = '0';
+            const emptyEl = document.getElementById('monitor-empty-state');
+            if (emptyEl) emptyEl.style.display = 'block';
+        }
+
+        function openMonitorModal(modelName) {
+            closeMonitorModal();
+
+            currentMonitorModel = modelName;
+            document.getElementById('monitor-model-title').textContent = modelName;
+            document.getElementById('monitor-model-title').title = modelName;
+
+            const connBadge = document.getElementById('monitor-conn-badge');
+            const connStatus = document.getElementById('monitor-conn-status');
+            connBadge.className = 'tag is-warning is-light ml-3';
+            connStatus.textContent = '连接中...';
+
+            clearMonitorData();
+
+            const modal = document.getElementById('monitor-modal');
+            modal.classList.add('is-active');
+
+            const sseUrl = '/monitor?model=' + encodeURIComponent(modelName);
+            try {
+                monitorEventSource = new EventSource(sseUrl);
+
+                monitorEventSource.onopen = () => {
+                    connBadge.className = 'tag is-success is-light ml-3';
+                    connStatus.textContent = '实时监听中';
+                };
+
+                monitorEventSource.onmessage = (e) => {
+                    if (!e.data) return;
+                    try {
+                        const ev = JSON.parse(e.data);
+                        handleMonitorPacket(ev);
+                    } catch (err) {
+                        console.error('Failed to parse monitor event JSON:', err, e.data);
+                    }
+                };
+
+                monitorEventSource.onerror = () => {
+                    connBadge.className = 'tag is-danger is-light ml-3';
+                    connStatus.textContent = '连接中断(重试中)';
+                };
+            } catch (err) {
+                console.error('Failed to init EventSource:', err);
+                connBadge.className = 'tag is-danger is-light ml-3';
+                connStatus.textContent = '连接失败: ' + err.message;
+            }
+        }
+
+        function closeMonitorModal() {
+            if (monitorEventSource) {
+                monitorEventSource.close();
+                monitorEventSource = null;
+            }
+            clearMonitorData();
+            currentMonitorModel = null;
+            const modal = document.getElementById('monitor-modal');
+            if (modal) modal.classList.remove('is-active');
+        }
+
+        function handleMonitorPacket(ev) {
+            const container = document.getElementById('monitor-sessions-container');
+            const emptyState = document.getElementById('monitor-empty-state');
+            if (emptyState) emptyState.style.display = 'none';
+
+            const sessId = ev.session_id || 'unknown_session';
+            let sess = activeSessions[sessId];
+
+            if (!sess) {
+                const card = document.createElement('div');
+                card.className = 'card session-card';
+                card.id = 'sess-card-' + sessId;
+
+                const header = document.createElement('header');
+                header.className = 'card-header py-2 px-3 is-align-items-center is-justify-content-space-between';
+                header.style.background = 'var(--bulma-scheme-main-ter, #f1f3f5)';
+
+                header.innerHTML = `
+                    <div class="is-flex is-align-items-center" style="overflow: hidden;">
+                        <span class="tag is-dark font-mono has-text-weight-bold mr-2" title="会话连接 ID">${escapeHtml(sessId)}</span>
+                        <span class="tag is-success is-light mr-2 font-mono sess-status-tag">
+                            <span class="status-dot"></span><span class="status-label">进行中</span>
+                        </span>
+                        <span class="tag is-info is-light mr-1 font-mono sess-up-badge">⬆ 0</span>
+                        <span class="tag is-success is-light mr-3 font-mono sess-down-badge">⬇ 0</span>
+                        <span class="is-size-7 has-text-grey font-mono">${formatTimeMs(ev.timestamp_ms)}</span>
+                    </div>
+                    <div>
+                        <button class="button is-small font-mono sess-toggle-btn" onclick="toggleSessionCollapse('${escapeHtml(sessId)}')">折叠</button>
+                    </div>
+                `;
+
+                const content = document.createElement('div');
+                content.className = 'card-content p-3';
+
+                card.appendChild(header);
+                card.appendChild(content);
+                container.appendChild(card);
+
+                sess = {
+                    cardEl: card,
+                    contentEl: content,
+                    statusTag: header.querySelector('.sess-status-tag'),
+                    statusLabel: header.querySelector('.status-label'),
+                    upBadge: header.querySelector('.sess-up-badge'),
+                    downBadge: header.querySelector('.sess-down-badge'),
+                    toggleBtn: header.querySelector('.sess-toggle-btn'),
+                    upCount: 0,
+                    downCount: 0,
+                };
+                activeSessions[sessId] = sess;
+
+                document.getElementById('monitor-sess-count').textContent = Object.keys(activeSessions).length;
+            }
+
+            if (ev.direction === 'upstream') {
+                sess.upCount++;
+                totalUpstreamPackets++;
+                sess.upBadge.textContent = '⬆ ' + sess.upCount;
+                document.getElementById('monitor-up-count').textContent = totalUpstreamPackets;
+            } else {
+                sess.downCount++;
+                totalDownstreamPackets++;
+                sess.downBadge.textContent = '⬇ ' + sess.downCount;
+                document.getElementById('monitor-down-count').textContent = totalDownstreamPackets;
+            }
+
+            if (ev.packet_type === 'session_end') {
+                sess.statusTag.className = 'tag is-dark is-light mr-2 font-mono';
+                sess.statusLabel.textContent = '已完成';
+                const dot = sess.statusTag.querySelector('.status-dot');
+                if (dot) dot.remove();
+            }
+
+            const item = document.createElement('div');
+            item.className = 'packet-item';
+
+            let dirBadge = '';
+            if (ev.direction === 'upstream') {
+                dirBadge = '<span class="tag is-info is-light has-text-weight-bold font-mono mr-2">⬆ 上行</span><span class="tag is-dark is-light font-mono mr-2">客户端请求</span>';
+            } else {
+                if (ev.packet_type === 'response') {
+                    dirBadge = '<span class="tag is-success is-light has-text-weight-bold font-mono mr-2">⬇ 下行</span><span class="tag is-primary is-light font-mono mr-2">完整响应</span>';
+                } else if (ev.packet_type === 'session_end') {
+                    dirBadge = '<span class="tag is-dark is-light has-text-weight-bold font-mono mr-2">✔ 结束</span><span class="tag is-light font-mono mr-2">连接完成</span>';
+                } else {
+                    dirBadge = '<span class="tag is-success is-light has-text-weight-bold font-mono mr-2">⬇ 下行</span><span class="tag is-success is-light font-mono mr-2">合并数据包</span>';
+                }
+            }
+
+            const formatted = formatJsonPayload(ev.payload);
+            const byteSize = (new TextEncoder().encode(ev.payload || '')).length;
+
+            item.innerHTML = `
+                <div class="is-flex is-align-items-center is-justify-content-space-between mb-1">
+                    <div class="is-flex is-align-items-center">
+                        ${dirBadge}
+                        <span class="is-size-7 has-text-grey font-mono mr-2">${formatTimeMs(ev.timestamp_ms)}</span>
+                        <span class="is-size-7 has-text-grey font-mono">${byteSize.toLocaleString()} 字节</span>
+                    </div>
+                    <div>
+                        <button class="button is-small is-ghost font-mono py-0 px-2 is-size-7" onclick="copyPacketJson(this)" title="复制该包 JSON">复制 JSON</button>
+                    </div>
+                </div>
+                <pre class="font-mono json-packet-pre"><code>${escapeHtml(formatted)}</code></pre>
+            `;
+
+            sess.contentEl.appendChild(item);
+
+            const autoScroll = document.getElementById('monitor-auto-scroll');
+            if (autoScroll && autoScroll.checked) {
+                const body = document.getElementById('monitor-modal-body');
+                if (body) {
+                    body.scrollTop = body.scrollHeight;
+                }
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('monitor-modal');
+                if (modal && modal.classList.contains('is-active')) {
+                    closeMonitorModal();
+                }
+            }
+        });
 
         // 初始化
         window.addEventListener('DOMContentLoaded', () => {

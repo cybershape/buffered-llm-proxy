@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"buffered-proxy/pkg/aggregator"
@@ -47,6 +48,8 @@ type ProxyServer struct {
 	cfg          ServerConfig
 	client       *http.Client
 	totalMetrics *metrics.StreamMetrics
+	monitorHub   *MonitorHub
+	sessionSeq   uint64
 }
 
 func NewProxyServer(cfg ServerConfig) *ProxyServer {
@@ -71,7 +74,12 @@ func NewProxyServer(cfg ServerConfig) *ProxyServer {
 		cfg:          cfg,
 		client:       cfg.HTTPClient,
 		totalMetrics: &metrics.StreamMetrics{},
+		monitorHub:   NewMonitorHub(),
 	}
+}
+
+func (s *ProxyServer) MonitorHub() *MonitorHub {
+	return s.monitorHub
 }
 
 func (s *ProxyServer) TotalMetrics() *metrics.StreamMetrics {
@@ -105,9 +113,13 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
-	if s.cfg.AllowMetricsAPI && (cleanPath == "/metrics" || cleanPath == "/dashboard") {
+	if s.cfg.AllowMetricsAPI && (cleanPath == "/metrics" || cleanPath == "/dashboard" || cleanPath == "/monitor") {
 		if cleanPath == "/dashboard" {
 			s.handleDashboard(w, r)
+			return
+		}
+		if cleanPath == "/monitor" {
+			s.handleMonitor(w, r)
 			return
 		}
 		s.handleMetrics(w, r)
@@ -244,8 +256,22 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	var payload streamCheckPayload
 	_ = json.Unmarshal(bodyBytes, &payload)
 
+	sessionID := fmt.Sprintf("sess_%d_%04d", time.Now().UnixMilli(), atomic.AddUint64(&s.sessionSeq, 1)%10000)
+
+	if s.monitorHub.HasSubscribers(payload.Model) {
+		s.monitorHub.Broadcast(MonitorPacketEvent{
+			SessionID:   sessionID,
+			Model:       payload.Model,
+			TimestampMs: time.Now().UnixMilli(),
+			Direction:   DirectionUpstream,
+			PacketType:  "request",
+			Payload:     string(bodyBytes),
+			Summary:     "客户端请求包",
+		})
+	}
+
 	if !payload.Stream {
-		s.transparentProxy(w, r, bodyBytes)
+		s.transparentProxy(w, r, bodyBytes, sessionID, payload.Model)
 		return
 	}
 
@@ -294,6 +320,39 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	reqMetrics := s.totalMetrics
 	pipeline := aggregator.NewStreamPipeline(s.cfg.BufferConfig, reqMetrics)
 	pipeline.SetRequestInfo(payload.Model, reqStartTime)
+
+	pipeline.SetPacketCallback(func(direction string, packetType string, data []byte) {
+		if !s.monitorHub.HasSubscribers(payload.Model) {
+			return
+		}
+		cleanPayload := extractSSEPayload(data)
+		if len(cleanPayload) == 0 {
+			return
+		}
+		s.monitorHub.Broadcast(MonitorPacketEvent{
+			SessionID:   sessionID,
+			Model:       payload.Model,
+			TimestampMs: time.Now().UnixMilli(),
+			Direction:   DirectionDownstream,
+			PacketType:  "downstream_chunk",
+			Payload:     cleanPayload,
+			Summary:     "下游合并数据包",
+		})
+	})
+
+	defer func() {
+		if s.monitorHub.HasSubscribers(payload.Model) {
+			s.monitorHub.Broadcast(MonitorPacketEvent{
+				SessionID:   sessionID,
+				Model:       payload.Model,
+				TimestampMs: time.Now().UnixMilli(),
+				Direction:   DirectionDownstream,
+				PacketType:  "session_end",
+				Payload:     `{"status":"completed"}`,
+				Summary:     "连接已结束",
+			})
+		}
+	}()
 
 	_ = pipeline.ProcessStream(r.Context(), resp.Body, w)
 }
@@ -366,7 +425,7 @@ func injectContextLength(v interface{}) bool {
 	return modified
 }
 
-func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, preloadedBody []byte) {
+func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, preloadedBody []byte, sessionID string, model string) {
 	targetURL := *s.cfg.UpstreamURL
 	targetURL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
 	targetURL.RawQuery = r.URL.RawQuery
@@ -394,9 +453,98 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, p
 	}
 	defer resp.Body.Close()
 
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read upstream response: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	if sessionID != "" && s.monitorHub.HasSubscribers(model) {
+		s.monitorHub.Broadcast(MonitorPacketEvent{
+			SessionID:   sessionID,
+			Model:       model,
+			TimestampMs: time.Now().UnixMilli(),
+			Direction:   DirectionDownstream,
+			PacketType:  "response",
+			Payload:     string(respBytes),
+			Summary:     "非流式响应包",
+		})
+		s.monitorHub.Broadcast(MonitorPacketEvent{
+			SessionID:   sessionID,
+			Model:       model,
+			TimestampMs: time.Now().UnixMilli(),
+			Direction:   DirectionDownstream,
+			PacketType:  "session_end",
+			Payload:     `{"status":"completed"}`,
+			Summary:     "连接已结束",
+		})
+	}
+
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	_, _ = w.Write(respBytes)
+}
+
+func extractSSEPayload(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		trimmed = bytes.TrimPrefix(trimmed, []byte("data:"))
+		trimmed = bytes.TrimSpace(trimmed)
+	}
+	return string(trimmed)
+}
+
+func (s *ProxyServer) handleMonitor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	model := r.URL.Query().Get("model")
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ch, unsub := s.monitorHub.Subscribe(model)
+	defer unsub()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			if _, writeErr := fmt.Fprintf(w, "data: %s\n\n", data); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func copyHeaders(dst, src http.Header) {
