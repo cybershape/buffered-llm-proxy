@@ -21,6 +21,7 @@ type StreamPipeline struct {
 	metrics      *metrics.StreamMetrics
 	parser       *semantic.Parser
 	serializer   *semantic.Serializer
+	protocol     semantic.Protocol
 	initialModel string
 	startTime    time.Time
 	packetCb     PacketCallback
@@ -38,6 +39,17 @@ func NewStreamPipeline(cfg BufferConfig, m *metrics.StreamMetrics) *StreamPipeli
 	}
 }
 
+func (p *StreamPipeline) SetProtocol(proto semantic.Protocol) {
+	p.protocol = proto
+	if p.parser != nil {
+		p.parser.SetProtocol(proto)
+	}
+}
+
+func (p *StreamPipeline) Protocol() semantic.Protocol {
+	return p.protocol
+}
+
 func (p *StreamPipeline) SetRequestInfo(model string, startTime time.Time) {
 	p.initialModel = model
 	p.startTime = startTime
@@ -52,14 +64,16 @@ func (p *StreamPipeline) SetPacketCallback(cb PacketCallback) {
 
 func extractCompletionTokens(usage interface{}) int64 {
 	if m, ok := usage.(map[string]interface{}); ok {
-		if ct, ok := m["completion_tokens"]; ok {
-			switch v := ct.(type) {
-			case float64:
-				return int64(v)
-			case int64:
-				return v
-			case int:
-				return int64(v)
+		for _, key := range []string{"completion_tokens", "output_tokens"} {
+			if ct, ok := m[key]; ok {
+				switch v := ct.(type) {
+				case float64:
+					return int64(v)
+				case int64:
+					return v
+				case int:
+					return int64(v)
+				}
 			}
 		}
 	}
@@ -188,7 +202,15 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 					p.metrics.IncReasoningFragmentsIn()
 					recordFirstToken()
 					atomic.AddInt64(&totalTokens, 1)
+				case *semantic.ResponseReasoningDeltaSegment:
+					p.metrics.IncReasoningFragmentsIn()
+					recordFirstToken()
+					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.ContentSegment:
+					p.metrics.IncContentFragmentsIn()
+					recordFirstToken()
+					atomic.AddInt64(&totalTokens, 1)
+				case *semantic.ResponseTextDeltaSegment:
 					p.metrics.IncContentFragmentsIn()
 					recordFirstToken()
 					atomic.AddInt64(&totalTokens, 1)
@@ -198,9 +220,22 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 						recordFirstToken()
 						atomic.AddInt64(&totalTokens, 1)
 					}
+				case *semantic.ResponseToolCallDeltaSegment:
+					p.metrics.IncToolArgumentFragmentsIn()
+					recordFirstToken()
+					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.UsageSegment:
 					if ct := extractCompletionTokens(v.Usage); ct > 0 {
 						atomic.StoreInt64(&usageTokens, ct)
+					}
+				case *semantic.ResponseControlSegment:
+					if v.Usage != nil {
+						if ct := extractCompletionTokens(v.Usage); ct > 0 {
+							atomic.StoreInt64(&usageTokens, ct)
+						}
+					}
+					if v.Model != "" && p.initialModel == "" {
+						p.initialModel = v.Model
 					}
 				}
 
@@ -242,11 +277,11 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 				flushed = true
 
 				switch seg.(type) {
-				case *semantic.ReasoningSegment:
+				case *semantic.ReasoningSegment, *semantic.ResponseReasoningDeltaSegment:
 					p.metrics.IncReasoningEventsOut()
-				case *semantic.ContentSegment:
+				case *semantic.ContentSegment, *semantic.ResponseTextDeltaSegment:
 					p.metrics.IncContentEventsOut()
-				case *semantic.ToolCallSegment:
+				case *semantic.ToolCallSegment, *semantic.ResponseToolCallDeltaSegment:
 					p.metrics.IncToolEventsOut()
 				}
 			}

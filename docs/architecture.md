@@ -46,27 +46,28 @@ To prevent unbounded memory growth when handling slow or stalled clients, high a
 ## 4. Semantic Segmentation & Coalescing Rules
 
 ### 4.1 Segment Categories
-1. `REASONING_DELTA`: Chain-of-thought tokens (supports `reasoning_content`, `reasoning`, `reasoning_text`, `thought`, preserving original field names).
-2. `CONTENT_DELTA`: Chat message body text (`delta.content`).
-3. `TOOL_CALL_DELTA`: Tool invocations (isolated by `choice.index` and `tool_call.index`).
+1. `REASONING_DELTA`: Chain-of-thought tokens (supports `reasoning_content`, `reasoning`, `reasoning_text`, `thought`, as well as Responses API `response.reasoning_text.delta` and `response.reasoning_summary_text.delta`).
+2. `CONTENT_DELTA`: Message body text deltas (`delta.content` in Chat Completions, `response.output_text.delta` and `response.refusal.delta` in Responses API).
+3. `TOOL_CALL_DELTA`: Tool invocations (`tool_calls` in Chat Completions, `response.function_call_arguments.delta`, `response.custom_tool_call_input.delta`, `response.mcp_call_arguments.delta`, etc. in Responses API).
 4. `ROLE`: Initial assistant role declaration.
 5. `FINISH`: Termination state (`finish_reason`).
-6. `USAGE`: Token usage metrics.
-7. `ERROR`: Error payloads.
-8. `DONE`: `[DONE]` termination stream indicator.
-9. `UNKNOWN`: Unrecognized or provider-specific custom extension events.
+6. `USAGE`: Token usage metrics (`usage` in Chat Completions, `usage.output_tokens` in Responses API `response.completed`).
+7. `CONTROL / LIFECYCLE`: Responses API boundary events (`response.created`, `response.in_progress`, `.added`, `.done`, `response.completed`).
+8. `ERROR`: Error payloads (`error`, `response.failed`).
+9. `DONE`: `[DONE]` termination stream indicator.
+10. `UNKNOWN`: Unrecognized or provider-specific custom extension events.
 
 ### 4.2 Merging Rules & Barrier Guarantees
 - **Role Idempotence & Non-Barrier**:
   - The first encountered `role` (e.g. `"role": "assistant"`) is emitted.
   - Subsequent duplicate roles in subsequent chunks for the same choice are ignored and **never create a barrier**, ensuring seamless content/reasoning aggregation.
 - **Homogeneous Merging**:
-  - Adjacent `ReasoningSegment` items (same choice index and field name) append strings.
-  - Adjacent `ContentSegment` items (same choice index) append strings.
-  - Adjacent `ToolCallSegment` items (same choice index) concatenate `arguments` byte-for-byte. Partial JSON is never parsed or re-serialized mid-stream to avoid modifying whitespace, escaping, or partial tokens.
+  - Adjacent `ReasoningSegment` items (same choice index and field name) append strings. Adjacent Responses API reasoning deltas (same item ID and output/summary index) append strings and advance `sequence_number`.
+  - Adjacent `ContentSegment` items (same choice index) append strings. Adjacent Responses API `response.output_text.delta` items (same item ID, output index, and content index) append strings, advance `sequence_number`, and concatenate logprobs when present.
+  - Adjacent `ToolCallSegment` items concatenate `arguments` byte-for-byte. Adjacent Responses API tool argument deltas concatenate arguments byte-for-byte and advance `sequence_number`. Partial JSON is never parsed or re-serialized mid-stream to avoid modifying whitespace, escaping, or partial tokens.
 - **Heterogeneous Barriers**:
   - `Reasoning -> Content` forms a barrier (never mixed into a single delta).
   - `Content -> Tool Call` forms a barrier, strictly preserving causal sequence.
   - `Tool Call -> Content` forms a barrier.
-  - `Finish`, `Usage`, `[DONE]`, and `Error` act as strict barriers, ensuring all preceding accumulated data is emitted first.
+  - Lifecycle boundaries (`response.output_item.added/done`, `response.content_part.added/done`, `response.output_text.done`), `Finish`, `Usage`, `[DONE]`, and `Error` act as strict barriers, ensuring all preceding accumulated data is emitted first.
   - Unrecognized events (`UNKNOWN`) pass through safely in their original sequence.

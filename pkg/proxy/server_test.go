@@ -918,3 +918,141 @@ func TestProxyServerMonitorHTTP_SSE(t *testing.T) {
 		t.Fatalf("expected SSE output to contain sess_test_http, got: %s", body)
 	}
 }
+
+func TestProxyResponsesMethodNotAllowed(t *testing.T) {
+	uURL, _ := url.Parse("http://127.0.0.1:8000")
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405 for GET /v1/responses, got %d", rec.Code)
+	}
+}
+
+func TestProxyResponsesStreamFalseTransparent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+			t.Errorf("unexpected upstream req: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"resp-123","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"responses sync reply"}]}]}`))
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:  uURL,
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4o","input":"hi","stream":false}`))
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "responses sync reply") {
+		t.Fatalf("expected sync reply, got: %s", body)
+	}
+}
+
+func TestProxyResponsesStreamTrueAggregated(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+			t.Errorf("unexpected upstream req: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		chunks := []string{
+			"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-stream\",\"model\":\"gpt-4o\",\"status\":\"in_progress\"}}\n\n",
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg-1\",\"type\":\"message\"}}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Alpha \"}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Beta \"}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":4,\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Gamma\"}\n\n",
+			"event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":5,\"item_id\":\"msg-1\",\"output_index\":0,\"content_index\":0,\"text\":\"Alpha Beta Gamma\"}\n\n",
+			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":6,\"output_index\":0}\n\n",
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":7,\"response\":{\"id\":\"resp-stream\",\"model\":\"gpt-4o\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3,\"total_tokens\":8}}}\n\n",
+		}
+		for _, chunk := range chunks {
+			_, _ = w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-4o","input":"hi","stream":true}`))
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	res := rec.Body.Bytes()
+	r := sse.NewReader(bytes.NewReader(res))
+	var receivedDeltas []string
+	var hasCreated, hasDone, hasCompleted bool
+
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read event err: %v", err)
+		}
+		switch ev.Type {
+		case "response.created":
+			hasCreated = true
+		case "response.output_text.delta":
+			var dMap map[string]interface{}
+			if err := json.Unmarshal(ev.Data, &dMap); err != nil {
+				t.Fatalf("invalid delta json: %v", err)
+			}
+			if d, ok := dMap["delta"].(string); ok {
+				receivedDeltas = append(receivedDeltas, d)
+			}
+		case "response.output_text.done":
+			hasDone = true
+		case "response.completed":
+			hasCompleted = true
+		}
+	}
+
+	if !hasCreated {
+		t.Fatalf("missing response.created event")
+	}
+	if !hasDone {
+		t.Fatalf("missing response.output_text.done event")
+	}
+	if !hasCompleted {
+		t.Fatalf("missing response.completed event")
+	}
+
+	joinedDelta := strings.Join(receivedDeltas, "")
+	if joinedDelta != "Alpha Beta Gamma" {
+		t.Fatalf("expected 'Alpha Beta Gamma', got %q", joinedDelta)
+	}
+}

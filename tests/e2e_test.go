@@ -296,3 +296,140 @@ func TestEndToEndZstdStreamingCompression(t *testing.T) {
 		t.Fatalf("expected to receive events over zstd compressed stream")
 	}
 }
+
+func TestEndToEndResponsesFlow(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var reqMap map[string]interface{}
+		_ = json.Unmarshal(bodyBytes, &reqMap)
+
+		streamVal, _ := reqMap["stream"].(bool)
+		if !streamVal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"resp-sync","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"responses sync body"}]}]}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		chunks := []string{
+			"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-stream\",\"model\":\"responses-test-model\",\"status\":\"in_progress\"}}\n\n",
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\"}}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"chunk-1-\"}\n\n",
+			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"chunk-2-\"}\n\n",
+			"event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"sequence_number\":4,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"chunk-1-chunk-2-\"}\n\n",
+			"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":5,\"output_index\":0}\n\n",
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"resp-stream\",\"model\":\"responses-test-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n",
+		}
+		for _, c := range chunks {
+			_, _ = w.Write([]byte(c))
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	uURL, err := url.Parse(upstreamServer.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url failed: %v", err)
+	}
+
+	proxySrv := proxy.NewProxyServer(proxy.ServerConfig{
+		UpstreamURL:     uURL,
+		BufferConfig:    aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI: true,
+	})
+
+	proxyTestServer := httptest.NewServer(proxySrv)
+	defer proxyTestServer.Close()
+
+	client := proxyTestServer.Client()
+
+	// 1. Non-streaming
+	respSync, err := client.Post(proxyTestServer.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"responses-test-model","input":"hi","stream":false}`))
+	if err != nil || respSync.StatusCode != http.StatusOK {
+		t.Fatalf("failed sync responses: %v, code: %d", err, respSync.StatusCode)
+	}
+	bodySync, _ := io.ReadAll(respSync.Body)
+	_ = respSync.Body.Close()
+	if !strings.Contains(string(bodySync), "responses sync body") {
+		t.Fatalf("unexpected sync body: %s", string(bodySync))
+	}
+
+	// 2. Streaming
+	respStream, err := client.Post(proxyTestServer.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"responses-test-model","input":"stream test","stream":true}`))
+	if err != nil || respStream.StatusCode != http.StatusOK {
+		t.Fatalf("failed stream responses: %v", err)
+	}
+	defer respStream.Body.Close()
+
+	if !strings.Contains(respStream.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("expected text/event-stream content type, got: %s", respStream.Header.Get("Content-Type"))
+	}
+
+	sseReader := sse.NewReader(respStream.Body)
+	var allDeltaText strings.Builder
+	var completedReceived bool
+
+	for {
+		ev, err := sseReader.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read stream error: %v", err)
+		}
+		if ev.Type == "response.completed" {
+			completedReceived = true
+		}
+		if ev.Type == "response.output_text.delta" {
+			var dMap map[string]interface{}
+			if json.Unmarshal(ev.Data, &dMap) == nil {
+				if d, ok := dMap["delta"].(string); ok {
+					allDeltaText.WriteString(d)
+				}
+			}
+		}
+	}
+
+	if !completedReceived {
+		t.Fatalf("expected response.completed in stream")
+	}
+	if allDeltaText.String() != "chunk-1-chunk-2-" {
+		t.Fatalf("expected 'chunk-1-chunk-2-', got %q", allDeltaText.String())
+	}
+
+	// 3. Metrics
+	respMetrics, err := client.Get(proxyTestServer.URL + "/metrics")
+	if err != nil || respMetrics.StatusCode != http.StatusOK {
+		t.Fatalf("failed to get metrics: %v", err)
+	}
+	var metricsMap map[string]interface{}
+	_ = json.NewDecoder(respMetrics.Body).Decode(&metricsMap)
+	_ = respMetrics.Body.Close()
+
+	modelsMap, ok := metricsMap["models"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected models in metrics: %v", metricsMap)
+	}
+	modelMetric, ok := modelsMap["responses-test-model"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected responses-test-model in models: %v", modelsMap)
+	}
+	if reqs, ok := modelMetric["requests"].(float64); !ok || reqs != 1 {
+		t.Errorf("expected 1 request, got %v", modelMetric["requests"])
+	}
+	if tps, ok := modelMetric["tps"].(float64); !ok || tps <= 0 {
+		t.Errorf("expected positive TPS, got %v", modelMetric["tps"])
+	}
+	if ttft, ok := modelMetric["avg_ttft_ms"].(float64); !ok || ttft <= 0 {
+		t.Errorf("expected positive Avg TTFT, got %v", modelMetric["avg_ttft_ms"])
+	}
+}

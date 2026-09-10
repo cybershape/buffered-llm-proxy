@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project is a high-performance, semantic-segment-coalescing streaming aggregation proxy for OpenAI-compatible Chat Completions, written in Go.
+This project is a high-performance, semantic-segment-coalescing streaming aggregation proxy for OpenAI-compatible Chat Completions and Responses API, written in Go.
 
 ## Architecture & Core Principles
 
@@ -17,14 +17,15 @@ This project is a high-performance, semantic-segment-coalescing streaming aggreg
    - Reasoning -> Content forms a barrier (never mixed in a single delta).
    - Content -> Tool Call forms a barrier.
    - Tool Call -> Content forms a barrier.
-   - `finish_reason`, `usage`, `[DONE]`, and `error` form control barriers, ensuring all preceding buffered tokens are flushed before emission.
+   - `finish_reason`, `usage`, `[DONE]`, `error`, and Responses API lifecycle events (`.added`, `.done`, `.completed`) form control barriers, ensuring all preceding buffered tokens are flushed before emission.
    - Repeated `role` deltas for the same choice are ignored and never form a barrier, preventing unnecessary segmentation.
 
 3. **Protocol & Schema Compatibility**:
    - Preserves original reasoning field names (such as `reasoning_content`, `reasoning`, `reasoning_text`, `thought`), without changing schema.
+   - Supports typed semantic streaming events in the OpenAI Responses API (`POST /v1/responses`), coalescing `response.output_text.delta`, `response.reasoning_text.delta`, `response.reasoning_summary_text.delta`, and tool argument deltas (`response.function_call_arguments.delta`, etc.) while maintaining monotonically increasing sequence numbers.
    - Tool call arguments are concatenated byte-by-byte as raw strings without parsing or stringifying partial JSON.
    - Preserves common response metadata (`id`, `model`, `system_fingerprint`, etc.) and passes through unrecognized custom extensions.
-   - Transparently passes through `GET /v1/models` and non-streaming `POST /v1/chat/completions` (`stream=false`).
+   - Transparently passes through `GET /v1/models` and non-streaming requests (`stream=false`) on `POST /v1/chat/completions` and `POST /v1/responses`.
 
 ## Engineering Guidelines
 

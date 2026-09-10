@@ -1,6 +1,6 @@
 # buffered-llm-proxy
 
-High-performance, semantic-coalescing streaming proxy for OpenAI-compatible Chat Completions, written in Go.
+High-performance, semantic-coalescing streaming proxy for OpenAI-compatible Chat Completions and Responses API, written in Go.
 
 It sits between upstream AI providers (or CLIProxyAPI) and downstream clients, buffering and aggregating fragmented Server-Sent Events (SSE) into larger batches driven by downstream network throughput, rather than rigid timers.
 
@@ -12,12 +12,13 @@ It sits between upstream AI providers (or CLIProxyAPI) and downstream clients, b
 - **Adaptive Batching**: Slower clients automatically receive larger batches; fast clients experience near-zero latency.
 - **Protocol & Semantic Preservation**:
   - **Reasoning**: Preserves original reasoning fields (`reasoning_content`, `reasoning`, `reasoning_text`, `thought`).
-  - **Content**: Coalesces adjacent text deltas for the same choice.
+  - **Content**: Coalesces adjacent text deltas for the same choice (`choices[].delta.content`) or Responses API item (`response.output_text.delta`).
+  - **Responses API Support**: Fully supports `POST /v1/responses` streaming and non-streaming, aggregating typed semantic events (`response.output_text.delta`, `response.reasoning_text.delta`, `response.function_call_arguments.delta`) while preserving event lifecycles and strictly advancing sequence numbers.
   - **Tool Calls**: Concatenates arguments byte-for-byte; isolates multiple tool calls across `(choice.index, tool_call.index)`.
   - **Role Idempotence**: Ignores duplicate role deltas without disrupting aggregation.
   - **Strict Barriers**: Preserves causal ordering between reasoning, content, tool calls, finish reasons, and `[DONE]`.
 - **Transparent Pass-Through**:
-  - `POST /v1/chat/completions` with `stream=false` is proxied transparently.
+  - `POST /v1/chat/completions` and `POST /v1/responses` with `stream=false` are proxied transparently.
   - `GET /v1/models` is passed through directly.
 - **Backpressure & Bounded Memory**: Configurable high/low watermarks (defaults: 32MB / 24MB) pause the upstream reader when the client is blocked.
 - **Metrics**: Real-time stats and coalescing ratios available via `/metrics`.
@@ -62,6 +63,7 @@ go build -o buffered-proxy ./cmd/proxy
 
 ### Streaming Request (Aggregated)
 
+#### Chat Completions
 ```bash
 curl -N -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -72,6 +74,18 @@ curl -N -X POST http://localhost:8080/v1/chat/completions \
     "messages": [
       {"role": "user", "content": "Explain quantum computing briefly"}
     ]
+  }'
+```
+
+#### Responses API
+```bash
+curl -N -X POST http://localhost:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "stream": true,
+    "input": "Explain quantum computing briefly"
   }'
 ```
 
@@ -87,6 +101,19 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "messages": [
       {"role": "user", "content": "Hello!"}
     ]
+  }'
+```
+
+Or with Responses API:
+
+```bash
+curl -X POST http://localhost:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "stream": false,
+    "input": "Hello!"
   }'
 ```
 

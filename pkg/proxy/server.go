@@ -18,6 +18,7 @@ import (
 	"buffered-proxy/pkg/aggregator"
 	"buffered-proxy/pkg/compress"
 	"buffered-proxy/pkg/metrics"
+	"buffered-proxy/pkg/semantic"
 )
 
 //go:embed dashboard.html
@@ -135,6 +136,15 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if cleanPath == "/v1/responses" {
+		if r.Method == http.MethodPost {
+			s.handleResponses(w, r)
+			return
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	if cleanPath == "/v1/models" && r.Method == http.MethodGet {
 		s.handleModels(w, r)
 		return
@@ -246,6 +256,14 @@ type streamCheckPayload struct {
 }
 
 func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	s.handleStreamingEndpoint(w, r, semantic.ProtocolChatCompletions)
+}
+
+func (s *ProxyServer) handleResponses(w http.ResponseWriter, r *http.Request) {
+	s.handleStreamingEndpoint(w, r, semantic.ProtocolResponses)
+}
+
+func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Request, proto semantic.Protocol) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
@@ -319,6 +337,7 @@ func (s *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	reqMetrics := s.totalMetrics
 	pipeline := aggregator.NewStreamPipeline(s.cfg.BufferConfig, reqMetrics)
+	pipeline.SetProtocol(proto)
 	pipeline.SetRequestInfo(payload.Model, reqStartTime)
 
 	pipeline.SetPacketCallback(func(direction string, packetType string, data []byte) {
@@ -487,9 +506,21 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, p
 
 func extractSSEPayload(data []byte) string {
 	trimmed := bytes.TrimSpace(data)
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
-		trimmed = bytes.TrimPrefix(trimmed, []byte("data:"))
-		trimmed = bytes.TrimSpace(trimmed)
+	if idx := bytes.Index(trimmed, []byte("data:")); idx != -1 {
+		after := trimmed[idx+len("data:"):]
+		lines := bytes.Split(after, []byte("\n"))
+		var buf bytes.Buffer
+		for i, line := range lines {
+			line = bytes.TrimSpace(line)
+			if bytes.HasPrefix(line, []byte("data:")) {
+				line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			}
+			if i > 0 && buf.Len() > 0 && len(line) > 0 {
+				buf.WriteByte(' ')
+			}
+			buf.Write(line)
+		}
+		return buf.String()
 	}
 	return string(trimmed)
 }

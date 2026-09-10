@@ -298,3 +298,216 @@ func TestCreatedTimestampHandling(t *testing.T) {
 		t.Fatalf("expected fallback unix timestamp for bare segment, got %v", parsed3["created"])
 	}
 }
+
+func TestResponseTextDeltaMerge(t *testing.T) {
+	d1 := &ResponseTextDeltaSegment{
+		EventType:      "response.output_text.delta",
+		ItemID:         "msg_1",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		SequenceNumber: 1,
+		Delta:          "Hello",
+		ResponseID:     "resp_1",
+	}
+	d2 := &ResponseTextDeltaSegment{
+		EventType:      "response.output_text.delta",
+		ItemID:         "msg_1",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		SequenceNumber: 2,
+		Delta:          " world",
+		ResponseID:     "resp_1",
+	}
+
+	if !d1.CanMerge(d2) {
+		t.Fatalf("expected d1 and d2 can merge")
+	}
+	d1.Merge(d2)
+	if d1.Delta != "Hello world" {
+		t.Fatalf("unexpected merged delta: %s", d1.Delta)
+	}
+	if d1.SequenceNumber != 2 {
+		t.Fatalf("expected sequence_number 2, got %d", d1.SequenceNumber)
+	}
+
+	dDiffItem := &ResponseTextDeltaSegment{
+		EventType:    "response.output_text.delta",
+		ItemID:       "msg_2",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Delta:        "diff",
+	}
+	if d1.CanMerge(dDiffItem) {
+		t.Fatalf("different item_id should not merge")
+	}
+
+	dDiffIndex := &ResponseTextDeltaSegment{
+		EventType:    "response.output_text.delta",
+		ItemID:       "msg_1",
+		OutputIndex:  1,
+		ContentIndex: 0,
+		Delta:        "diff",
+	}
+	if d1.CanMerge(dDiffIndex) {
+		t.Fatalf("different output_index should not merge")
+	}
+}
+
+func TestResponseReasoningDeltaMerge(t *testing.T) {
+	sIdx := 0
+	r1 := &ResponseReasoningDeltaSegment{
+		EventType:      "response.reasoning_summary_text.delta",
+		ItemID:         "rs_1",
+		OutputIndex:    0,
+		SummaryIndex:   &sIdx,
+		SequenceNumber: 5,
+		Delta:          "Step 1:",
+	}
+	r2 := &ResponseReasoningDeltaSegment{
+		EventType:      "response.reasoning_summary_text.delta",
+		ItemID:         "rs_1",
+		OutputIndex:    0,
+		SummaryIndex:   &sIdx,
+		SequenceNumber: 6,
+		Delta:          " analyze",
+	}
+
+	if !r1.CanMerge(r2) {
+		t.Fatalf("expected r1 and r2 can merge")
+	}
+	r1.Merge(r2)
+	if r1.Delta != "Step 1: analyze" {
+		t.Fatalf("unexpected merged delta: %s", r1.Delta)
+	}
+	if r1.SequenceNumber != 6 {
+		t.Fatalf("expected sequence_number 6, got %d", r1.SequenceNumber)
+	}
+}
+
+func TestResponseToolCallDeltaMerge(t *testing.T) {
+	t1 := &ResponseToolCallDeltaSegment{
+		EventType:      "response.function_call_arguments.delta",
+		ItemID:         "fc_1",
+		OutputIndex:    0,
+		CallID:         "call_100",
+		SequenceNumber: 1,
+		Delta:          "{\"param\":",
+	}
+	t2 := &ResponseToolCallDeltaSegment{
+		EventType:      "response.function_call_arguments.delta",
+		ItemID:         "fc_1",
+		OutputIndex:    0,
+		SequenceNumber: 2,
+		Delta:          "\"value\"}",
+	}
+
+	if !t1.CanMerge(t2) {
+		t.Fatalf("expected t1 and t2 can merge")
+	}
+	t1.Merge(t2)
+	if t1.Delta != "{\"param\":\"value\"}" {
+		t.Fatalf("unexpected merged delta: %s", t1.Delta)
+	}
+	if t1.SequenceNumber != 2 {
+		t.Fatalf("expected sequence_number 2, got %d", t1.SequenceNumber)
+	}
+	if t1.CallID != "call_100" {
+		t.Fatalf("expected call_id preserved")
+	}
+}
+
+func TestResponsesBarrierRules(t *testing.T) {
+	reasoning := &ResponseReasoningDeltaSegment{
+		EventType:   "response.reasoning_text.delta",
+		ItemID:      "rs_1",
+		OutputIndex: 0,
+		Delta:       "thinking",
+	}
+	content := &ResponseTextDeltaSegment{
+		EventType:   "response.output_text.delta",
+		ItemID:      "msg_1",
+		OutputIndex: 1,
+		Delta:       "hello",
+	}
+	tool := &ResponseToolCallDeltaSegment{
+		EventType:   "response.function_call_arguments.delta",
+		ItemID:      "fc_1",
+		OutputIndex: 2,
+		Delta:       "{}",
+	}
+	control := &ResponseControlSegment{
+		EventType: "response.output_text.done",
+		Data:      []byte(`{"type":"response.output_text.done"}`),
+	}
+
+	if reasoning.CanMerge(content) {
+		t.Fatalf("responses reasoning and content must not merge")
+	}
+	if content.CanMerge(tool) {
+		t.Fatalf("responses content and tool must not merge")
+	}
+	if tool.CanMerge(content) {
+		t.Fatalf("responses tool and content must not merge")
+	}
+	if content.CanMerge(control) {
+		t.Fatalf("responses content and control must not merge")
+	}
+	if control.CanMerge(content) {
+		t.Fatalf("responses control and content must not merge")
+	}
+}
+
+func TestResponsesParserAndSerializer(t *testing.T) {
+	p := NewParser()
+	p.SetProtocol(ProtocolResponses)
+	s := NewSerializer()
+
+	ev1 := &sse.Event{
+		Type: "response.output_text.delta",
+		Data: []byte(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello","sequence_number":1}`),
+	}
+	segs1, err := p.ParseEvent(ev1)
+	if err != nil || len(segs1) != 1 {
+		t.Fatalf("failed parse ev1: %v", err)
+	}
+	tSeg1, ok := segs1[0].(*ResponseTextDeltaSegment)
+	if !ok {
+		t.Fatalf("expected ResponseTextDeltaSegment")
+	}
+
+	ev2 := &sse.Event{
+		Type: "response.output_text.delta",
+		Data: []byte(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":" World","sequence_number":2}`),
+	}
+	segs2, err := p.ParseEvent(ev2)
+	if err != nil || len(segs2) != 1 {
+		t.Fatalf("failed parse ev2: %v", err)
+	}
+
+	if !tSeg1.CanMerge(segs2[0]) {
+		t.Fatalf("expected can merge")
+	}
+	tSeg1.Merge(segs2[0])
+
+	outBytes := s.SerializeSegment(tSeg1)
+	outStr := string(outBytes)
+	if !strings.Contains(outStr, "event: response.output_text.delta") {
+		t.Fatalf("missing event header in: %s", outStr)
+	}
+	if !strings.Contains(outStr, "Hello World") {
+		t.Fatalf("missing merged text in: %s", outStr)
+	}
+
+	evDone := &sse.Event{
+		Type: "response.output_text.done",
+		Data: []byte(`{"type":"response.output_text.done","item_id":"msg_1","output_index":0,"content_index":0,"text":"Hello World"}`),
+	}
+	segsDone, err := p.ParseEvent(evDone)
+	if err != nil || len(segsDone) != 1 {
+		t.Fatalf("failed parse evDone: %v", err)
+	}
+	outDone := s.SerializeSegment(segsDone[0])
+	if !strings.Contains(string(outDone), "event: response.output_text.done") {
+		t.Fatalf("missing done event: %s", string(outDone))
+	}
+}

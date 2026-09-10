@@ -62,7 +62,36 @@ When `"stream": false` or omitted, requests are transparently reverse-proxied to
 
 ---
 
-### 3.3 `GET /v1/models` (Transparent Pass-through)
+### 3.3 `POST /v1/responses` (Streaming Aggregation)
+Triggered when request payload to the Responses API specifies `"stream": true`:
+- Coalesces typed streaming events:
+  - Text deltas (`response.output_text.delta`, `response.refusal.delta`)
+  - Reasoning text deltas (`response.reasoning_text.delta`, `response.reasoning_summary_text.delta`)
+  - Tool/function argument deltas (`response.function_call_arguments.delta`, `response.custom_tool_call_input.delta`, `response.mcp_call_arguments.delta`, etc.)
+- Preserves event lifecycles and control barriers (`response.created`, `response.output_item.added`, `response.output_item.done`, `response.completed`).
+- Monotonically advances `sequence_number` to the latest aggregated chunk.
+- Preserves all metadata (`response_id`, `item_id`, `output_index`, `content_index`, `call_id`, `logprobs`).
+
+#### Example Request
+```bash
+curl -N -X POST http://localhost:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "stream": true,
+    "input": "Hello"
+  }'
+```
+
+---
+
+### 3.4 `POST /v1/responses` (Non-streaming Transparent Pass-through)
+When `"stream": false` or omitted, requests are transparently reverse-proxied to upstream `/v1/responses`.
+
+---
+
+### 3.5 `GET /v1/models` (Transparent Pass-through)
 Passes through model list requests directly, preserving upstream headers and response body.
 
 #### Example Request
@@ -73,7 +102,7 @@ curl http://localhost:8080/v1/models \
 
 ---
 
-### 3.4 `GET /metrics` (Monitoring & Metrics)
+### 3.6 `GET /metrics` (Monitoring & Metrics)
 Exposes aggregated throughput and coalescing statistics since server start:
 
 ```json

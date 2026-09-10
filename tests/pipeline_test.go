@@ -14,6 +14,7 @@ import (
 
 	"buffered-proxy/pkg/aggregator"
 	"buffered-proxy/pkg/metrics"
+	"buffered-proxy/pkg/semantic"
 	"buffered-proxy/pkg/sse"
 )
 
@@ -575,5 +576,286 @@ func TestPipelineChunkWithoutCreatedGetsTimestamp(t *testing.T) {
 	}
 	if chunksChecked == 0 {
 		t.Fatalf("expected at least 1 chunk checked")
+	}
+}
+
+func TestPipelineWithResponsesFixtures(t *testing.T) {
+	fixtureFiles := []string{
+		"../fixtures/responses_content.sse",
+		"../fixtures/responses_reasoning.sse",
+		"../fixtures/responses_tool_call.sse",
+		"../fixtures/responses_reasoning_content_tool.sse",
+	}
+
+	for _, fixturePath := range fixtureFiles {
+		t.Run(fixturePath, func(t *testing.T) {
+			data, err := os.ReadFile(fixturePath)
+			if err != nil {
+				t.Fatalf("failed to read fixture: %v", err)
+			}
+
+			pipeIn := io.NopCloser(bytes.NewReader(data))
+			outBuf := &bytes.Buffer{}
+			m := &metrics.StreamMetrics{}
+
+			pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), m)
+			pipeline.SetProtocol(semantic.ProtocolResponses)
+			if err := pipeline.ProcessStream(context.Background(), pipeIn, outBuf); err != nil {
+				t.Fatalf("pipeline failed: %v", err)
+			}
+
+			if m.UpstreamSSEEvents == 0 {
+				t.Fatalf("expected upstream events > 0")
+			}
+			if m.DownstreamSSEEvents == 0 {
+				t.Fatalf("expected downstream events > 0")
+			}
+
+			r := sse.NewReader(bytes.NewReader(outBuf.Bytes()))
+			hasCompleted := false
+			for {
+				ev, err := r.ReadEvent()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("failed to read out event: %v", err)
+				}
+				if ev.Type == "response.completed" {
+					hasCompleted = true
+				}
+			}
+			if !hasCompleted {
+				t.Fatalf("missing response.completed in downstream")
+			}
+		})
+	}
+}
+
+func Test100ResponsesOutputTextDeltasAggregation(t *testing.T) {
+	var inSSE bytes.Buffer
+	var expectedText strings.Builder
+
+	inSSE.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_100\",\"model\":\"gpt-4o\",\"status\":\"in_progress\"}}\n\n")
+
+	for i := 1; i <= 100; i++ {
+		frag := fmt.Sprintf("word%d ", i)
+		expectedText.WriteString(frag)
+		inSSE.WriteString(fmt.Sprintf("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":%q,\"sequence_number\":%d}\n\n", frag, i))
+	}
+	inSSE.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":101,\"response\":{\"id\":\"resp_100\",\"model\":\"gpt-4o\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":100,\"total_tokens\":105}}}\n\n")
+
+	slowWriter := &slowDownstreamWriter{delay: 2 * time.Millisecond}
+	m := &metrics.StreamMetrics{}
+	cfg := aggregator.DefaultBufferConfig()
+	pipeline := aggregator.NewStreamPipeline(cfg, m)
+	pipeline.SetProtocol(semantic.ProtocolResponses)
+
+	err := pipeline.ProcessStream(context.Background(), io.NopCloser(&inSSE), slowWriter)
+	if err != nil {
+		t.Fatalf("stream err: %v", err)
+	}
+
+	r := sse.NewReader(bytes.NewReader(slowWriter.Bytes()))
+	var gatheredText strings.Builder
+	deltaEventsCount := 0
+
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if ev.Type == "response.output_text.delta" {
+			var chunk map[string]interface{}
+			if json.Unmarshal(ev.Data, &chunk) == nil {
+				if d, ok := chunk["delta"].(string); ok && len(d) > 0 {
+					gatheredText.WriteString(d)
+					deltaEventsCount++
+				}
+			}
+		}
+	}
+
+	if gatheredText.String() != expectedText.String() {
+		t.Fatalf("content mismatch: expected len %d, got len %d", len(expectedText.String()), len(gatheredText.String()))
+	}
+	if deltaEventsCount >= 100 {
+		t.Fatalf("expected delta events count to be coalesced (< 100), got %d", deltaEventsCount)
+	}
+}
+
+func Test100ResponsesReasoningDeltasAggregation(t *testing.T) {
+	var inSSE bytes.Buffer
+	var expectedReasoning strings.Builder
+
+	inSSE.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_r100\",\"model\":\"o3-mini\",\"status\":\"in_progress\"}}\n\n")
+
+	for i := 1; i <= 100; i++ {
+		frag := fmt.Sprintf("thought%d ", i)
+		expectedReasoning.WriteString(frag)
+		inSSE.WriteString(fmt.Sprintf("event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"content_index\":0,\"delta\":%q,\"sequence_number\":%d}\n\n", frag, i))
+	}
+	inSSE.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":101,\"response\":{\"id\":\"resp_r100\",\"model\":\"o3-mini\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":100,\"total_tokens\":110}}}\n\n")
+
+	slowWriter := &slowDownstreamWriter{delay: 2 * time.Millisecond}
+	m := &metrics.StreamMetrics{}
+	pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), m)
+	pipeline.SetProtocol(semantic.ProtocolResponses)
+
+	err := pipeline.ProcessStream(context.Background(), io.NopCloser(&inSSE), slowWriter)
+	if err != nil {
+		t.Fatalf("stream err: %v", err)
+	}
+
+	r := sse.NewReader(bytes.NewReader(slowWriter.Bytes()))
+	var gatheredReasoning strings.Builder
+	reasoningEventsCount := 0
+
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if ev.Type == "response.reasoning_text.delta" {
+			var chunk map[string]interface{}
+			if json.Unmarshal(ev.Data, &chunk) == nil {
+				if d, ok := chunk["delta"].(string); ok && len(d) > 0 {
+					gatheredReasoning.WriteString(d)
+					reasoningEventsCount++
+				}
+			}
+		}
+	}
+
+	if gatheredReasoning.String() != expectedReasoning.String() {
+		t.Fatalf("reasoning mismatch")
+	}
+	if reasoningEventsCount >= 100 {
+		t.Fatalf("expected reasoning coalesced (< 100), got %d", reasoningEventsCount)
+	}
+}
+
+func Test100ResponsesToolCallArgumentsAggregation(t *testing.T) {
+	rawFragments := []string{
+		"{", "\"", "k", "e", "y", "\"", ":", " ", "\"", "v", "a", "l", "u", "e", "\"", ",",
+		"\"", "n", "u", "m", "\"", ":", "1", "2", "3", ",",
+		"\"", "a", "r", "r", "\"", ":", "[", "1", ",", "2", ",", "3", "]", "}"}
+
+	for len(rawFragments) < 100 {
+		rawFragments = append(rawFragments, " ")
+	}
+
+	var expectedArgs strings.Builder
+	var inSSE bytes.Buffer
+	inSSE.WriteString("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_tc100\",\"model\":\"gpt-4o\",\"status\":\"in_progress\"}}\n\n")
+
+	for i, frag := range rawFragments {
+		expectedArgs.WriteString(frag)
+		inSSE.WriteString(fmt.Sprintf("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"call_id\":\"call_abc\",\"delta\":%q,\"sequence_number\":%d}\n\n", frag, i+1))
+	}
+	inSSE.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":102,\"response\":{\"id\":\"resp_tc100\",\"model\":\"gpt-4o\",\"status\":\"completed\"}}\n\n")
+
+	slowWriter := &slowDownstreamWriter{delay: 1 * time.Millisecond}
+	m := &metrics.StreamMetrics{}
+	pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), m)
+	pipeline.SetProtocol(semantic.ProtocolResponses)
+
+	err := pipeline.ProcessStream(context.Background(), io.NopCloser(&inSSE), slowWriter)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	r := sse.NewReader(bytes.NewReader(slowWriter.Bytes()))
+	var gatheredArgs strings.Builder
+	var foundCallID string
+
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if ev.Type == "response.function_call_arguments.delta" {
+			var chunk map[string]interface{}
+			if json.Unmarshal(ev.Data, &chunk) == nil {
+				if cid, ok := chunk["call_id"].(string); ok && cid != "" {
+					foundCallID = cid
+				}
+				if d, ok := chunk["delta"].(string); ok {
+					gatheredArgs.WriteString(d)
+				}
+			}
+		}
+	}
+
+	if foundCallID != "call_abc" {
+		t.Fatalf("expected call_id call_abc, got %q", foundCallID)
+	}
+	if gatheredArgs.String() != expectedArgs.String() {
+		t.Fatalf("arguments byte mismatch: expected %q, got %q", expectedArgs.String(), gatheredArgs.String())
+	}
+}
+
+func TestResponsesStrictBarrierOrder(t *testing.T) {
+	fixtureData, err := os.ReadFile("../fixtures/responses_reasoning_content_tool.sse")
+	if err != nil {
+		t.Fatalf("failed to read fixture: %v", err)
+	}
+
+	slowWriter := &slowDownstreamWriter{delay: 2 * time.Millisecond}
+	pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), nil)
+	pipeline.SetProtocol(semantic.ProtocolResponses)
+
+	err = pipeline.ProcessStream(context.Background(), io.NopCloser(bytes.NewReader(fixtureData)), slowWriter)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	r := sse.NewReader(bytes.NewReader(slowWriter.Bytes()))
+	var eventStages []string
+
+	for {
+		ev, err := r.ReadEvent()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		switch ev.Type {
+		case "response.reasoning_text.delta":
+			eventStages = append(eventStages, "REASONING")
+		case "response.output_text.delta":
+			eventStages = append(eventStages, "CONTENT")
+		case "response.function_call_arguments.delta":
+			eventStages = append(eventStages, "TOOL")
+		case "response.completed":
+			eventStages = append(eventStages, "COMPLETED")
+		}
+	}
+
+	var collapsedStages []string
+	for _, st := range eventStages {
+		if len(collapsedStages) == 0 || collapsedStages[len(collapsedStages)-1] != st {
+			collapsedStages = append(collapsedStages, st)
+		}
+	}
+
+	expectedOrder := []string{"REASONING", "CONTENT", "TOOL", "CONTENT", "COMPLETED"}
+	if len(collapsedStages) != len(expectedOrder) {
+		t.Fatalf("expected stage transitions %v, got %v", expectedOrder, collapsedStages)
+	}
+	for i, expected := range expectedOrder {
+		if collapsedStages[i] != expected {
+			t.Fatalf("stage transition %d mismatch: expected %s, got %s", i, expected, collapsedStages[i])
+		}
 	}
 }

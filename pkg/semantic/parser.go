@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"buffered-proxy/pkg/sse"
 )
 
 type Parser struct {
+	protocol  Protocol
 	meta      CommonMetadata
 	seenRoles map[int]string
 }
@@ -21,6 +23,14 @@ func NewParser() *Parser {
 		},
 		seenRoles: make(map[int]string),
 	}
+}
+
+func (p *Parser) SetProtocol(proto Protocol) {
+	p.protocol = proto
+}
+
+func (p *Parser) Protocol() Protocol {
+	return p.protocol
 }
 
 func (p *Parser) SetStartTime(t time.Time) {
@@ -38,6 +48,37 @@ func (p *Parser) Model() string {
 }
 
 func (p *Parser) ParseEvent(ev *sse.Event) ([]Segment, error) {
+	switch p.protocol {
+	case ProtocolChatCompletions:
+		return p.parseChatCompletionsEvent(ev)
+	case ProtocolResponses:
+		return p.parseResponsesEvent(ev)
+	default:
+		if p.isResponsesEvent(ev) {
+			return p.parseResponsesEvent(ev)
+		}
+		return p.parseChatCompletionsEvent(ev)
+	}
+}
+
+func (p *Parser) isResponsesEvent(ev *sse.Event) bool {
+	if strings.HasPrefix(ev.Type, "response.") {
+		return true
+	}
+	data := bytes.TrimSpace(ev.Data)
+	if bytes.HasPrefix(data, []byte(`{"type":"response.`)) || bytes.HasPrefix(data, []byte(`{"type": "response.`)) {
+		return true
+	}
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &probe) == nil && strings.HasPrefix(probe.Type, "response.") {
+		return true
+	}
+	return false
+}
+
+func (p *Parser) parseChatCompletionsEvent(ev *sse.Event) ([]Segment, error) {
 	data := bytes.TrimSpace(ev.Data)
 	if len(data) == 0 {
 		return nil, nil
@@ -292,4 +333,281 @@ func (p *Parser) parseChoice(choice ChoiceChunk) []Segment {
 	}
 
 	return segments
+}
+
+func (p *Parser) parseResponsesEvent(ev *sse.Event) ([]Segment, error) {
+	data := bytes.TrimSpace(ev.Data)
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if string(data) == "[DONE]" {
+		return []Segment{&ResponseControlSegment{
+			EventType: ev.Type,
+			ID:        ev.ID,
+			Data:      data,
+			IsDone:    true,
+			Metadata:  p.meta,
+		}}, nil
+	}
+
+	var rootMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rootMap); err != nil {
+		return []Segment{&ResponseControlSegment{
+			EventType: ev.Type,
+			ID:        ev.ID,
+			Data:      data,
+			Metadata:  p.meta,
+		}}, nil
+	}
+
+	eventType := ev.Type
+	if rawType, ok := rootMap["type"]; ok {
+		var s string
+		if json.Unmarshal(rawType, &s) == nil && s != "" {
+			if eventType == "" {
+				eventType = s
+			}
+		}
+	}
+
+	p.extractResponsesMetadata(rootMap)
+
+	if eventType == "error" || eventType == "response.failed" {
+		return []Segment{&ResponseControlSegment{
+			EventType: eventType,
+			ID:        ev.ID,
+			Data:      data,
+			IsError:   true,
+			Metadata:  p.meta,
+		}}, nil
+	}
+	if _, hasErr := rootMap["error"]; hasErr {
+		return []Segment{&ResponseControlSegment{
+			EventType: eventType,
+			ID:        ev.ID,
+			Data:      data,
+			IsError:   true,
+			Metadata:  p.meta,
+		}}, nil
+	}
+
+	if eventType == "response.output_text.delta" || eventType == "response.refusal.delta" {
+		seg := &ResponseTextDeltaSegment{
+			EventType: eventType,
+			SSEID:     ev.ID,
+			Metadata:  p.meta,
+		}
+		if raw, ok := rootMap["delta"]; ok {
+			_ = json.Unmarshal(raw, &seg.Delta)
+		}
+		if raw, ok := rootMap["item_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ItemID)
+		}
+		if raw, ok := rootMap["output_index"]; ok {
+			_ = json.Unmarshal(raw, &seg.OutputIndex)
+		}
+		if raw, ok := rootMap["content_index"]; ok {
+			_ = json.Unmarshal(raw, &seg.ContentIndex)
+		}
+		if raw, ok := rootMap["sequence_number"]; ok {
+			_ = json.Unmarshal(raw, &seg.SequenceNumber)
+		}
+		if raw, ok := rootMap["response_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ResponseID)
+		}
+		if raw, ok := rootMap["logprobs"]; ok && len(raw) > 0 && string(raw) != "null" {
+			seg.HasLogprobs = true
+			_ = json.Unmarshal(raw, &seg.Logprobs)
+		}
+		knownKeys := map[string]bool{
+			"type": true, "item_id": true, "output_index": true, "content_index": true,
+			"delta": true, "sequence_number": true, "response_id": true, "logprobs": true,
+		}
+		for k, raw := range rootMap {
+			if !knownKeys[k] {
+				if seg.Extra == nil {
+					seg.Extra = make(map[string]interface{})
+				}
+				var val interface{}
+				if json.Unmarshal(raw, &val) == nil {
+					seg.Extra[k] = val
+				}
+			}
+		}
+		return []Segment{seg}, nil
+	}
+
+	if eventType == "response.reasoning_text.delta" || eventType == "response.reasoning_summary_text.delta" {
+		seg := &ResponseReasoningDeltaSegment{
+			EventType: eventType,
+			SSEID:     ev.ID,
+			Metadata:  p.meta,
+		}
+		if raw, ok := rootMap["delta"]; ok {
+			_ = json.Unmarshal(raw, &seg.Delta)
+		}
+		if raw, ok := rootMap["item_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ItemID)
+		}
+		if raw, ok := rootMap["output_index"]; ok {
+			_ = json.Unmarshal(raw, &seg.OutputIndex)
+		}
+		if raw, ok := rootMap["summary_index"]; ok {
+			var idx int
+			if json.Unmarshal(raw, &idx) == nil {
+				seg.SummaryIndex = &idx
+			}
+		}
+		if raw, ok := rootMap["content_index"]; ok {
+			var idx int
+			if json.Unmarshal(raw, &idx) == nil {
+				seg.ContentIndex = &idx
+			}
+		}
+		if raw, ok := rootMap["sequence_number"]; ok {
+			_ = json.Unmarshal(raw, &seg.SequenceNumber)
+		}
+		if raw, ok := rootMap["response_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ResponseID)
+		}
+		knownKeys := map[string]bool{
+			"type": true, "item_id": true, "output_index": true, "summary_index": true,
+			"content_index": true, "delta": true, "sequence_number": true, "response_id": true,
+		}
+		for k, raw := range rootMap {
+			if !knownKeys[k] {
+				if seg.Extra == nil {
+					seg.Extra = make(map[string]interface{})
+				}
+				var val interface{}
+				if json.Unmarshal(raw, &val) == nil {
+					seg.Extra[k] = val
+				}
+			}
+		}
+		return []Segment{seg}, nil
+	}
+
+	if eventType == "response.function_call_arguments.delta" ||
+		eventType == "response.custom_tool_call_input.delta" ||
+		eventType == "response.mcp_call_arguments.delta" ||
+		eventType == "response.code_interpreter_call_code.delta" ||
+		eventType == "response.shell_call_command.delta" ||
+		eventType == "response.shell_call_output_content.delta" {
+		seg := &ResponseToolCallDeltaSegment{
+			EventType: eventType,
+			SSEID:     ev.ID,
+			Metadata:  p.meta,
+		}
+		if raw, ok := rootMap["delta"]; ok {
+			_ = json.Unmarshal(raw, &seg.Delta)
+		}
+		if raw, ok := rootMap["item_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ItemID)
+		}
+		if raw, ok := rootMap["output_index"]; ok {
+			_ = json.Unmarshal(raw, &seg.OutputIndex)
+		}
+		if raw, ok := rootMap["call_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.CallID)
+		}
+		if raw, ok := rootMap["sequence_number"]; ok {
+			_ = json.Unmarshal(raw, &seg.SequenceNumber)
+		}
+		if raw, ok := rootMap["response_id"]; ok {
+			_ = json.Unmarshal(raw, &seg.ResponseID)
+		}
+		knownKeys := map[string]bool{
+			"type": true, "item_id": true, "output_index": true, "call_id": true,
+			"delta": true, "sequence_number": true, "response_id": true,
+		}
+		for k, raw := range rootMap {
+			if !knownKeys[k] {
+				if seg.Extra == nil {
+					seg.Extra = make(map[string]interface{})
+				}
+				var val interface{}
+				if json.Unmarshal(raw, &val) == nil {
+					seg.Extra[k] = val
+				}
+			}
+		}
+		return []Segment{seg}, nil
+	}
+
+	var usageVal interface{}
+	var modelStr string
+	if rawResp, ok := rootMap["response"]; ok && len(rawResp) > 0 && string(rawResp) != "null" {
+		var respMap map[string]interface{}
+		if json.Unmarshal(rawResp, &respMap) == nil {
+			if u, ok := respMap["usage"]; ok && u != nil {
+				usageVal = u
+			}
+			if m, ok := respMap["model"].(string); ok && m != "" {
+				modelStr = m
+			}
+		}
+	}
+	if usageVal == nil {
+		if rawUsage, ok := rootMap["usage"]; ok && len(rawUsage) > 0 && string(rawUsage) != "null" {
+			_ = json.Unmarshal(rawUsage, &usageVal)
+		}
+	}
+	if modelStr == "" {
+		modelStr = p.meta.Model
+	}
+
+	return []Segment{&ResponseControlSegment{
+		EventType: eventType,
+		ID:        ev.ID,
+		Data:      data,
+		Usage:     usageVal,
+		Model:     modelStr,
+		Metadata:  p.meta,
+	}}, nil
+}
+
+func (p *Parser) extractResponsesMetadata(rootMap map[string]json.RawMessage) {
+	if raw, ok := rootMap["response_id"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			p.meta.ID = s
+		}
+	}
+	if raw, ok := rootMap["id"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			p.meta.ID = s
+		}
+	}
+	if raw, ok := rootMap["model"]; ok {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			p.meta.Model = s
+		}
+	}
+
+	if rawResp, ok := rootMap["response"]; ok && len(rawResp) > 0 && string(rawResp) != "null" {
+		var respMap map[string]json.RawMessage
+		if json.Unmarshal(rawResp, &respMap) == nil {
+			if raw, ok := respMap["id"]; ok {
+				var s string
+				if json.Unmarshal(raw, &s) == nil && s != "" {
+					p.meta.ID = s
+				}
+			}
+			if raw, ok := respMap["model"]; ok {
+				var s string
+				if json.Unmarshal(raw, &s) == nil && s != "" {
+					p.meta.Model = s
+				}
+			}
+			if raw, ok := respMap["created_at"]; ok {
+				var c int64
+				if json.Unmarshal(raw, &c) == nil && c != 0 {
+					p.meta.Created = c
+				}
+			}
+		}
+	}
 }

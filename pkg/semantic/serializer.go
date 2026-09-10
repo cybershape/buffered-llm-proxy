@@ -29,6 +29,14 @@ func (s *Serializer) SerializeSegment(seg Segment) []byte {
 		return s.serializeUsage(v)
 	case *RawSegment:
 		return s.serializeRaw(v)
+	case *ResponseTextDeltaSegment:
+		return s.serializeResponseTextDelta(v)
+	case *ResponseReasoningDeltaSegment:
+		return s.serializeResponseReasoningDelta(v)
+	case *ResponseToolCallDeltaSegment:
+		return s.serializeResponseToolCallDelta(v)
+	case *ResponseControlSegment:
+		return s.serializeResponseControl(v)
 	default:
 		return nil
 	}
@@ -164,4 +172,91 @@ func (s *Serializer) serializeRaw(seg *RawSegment) []byte {
 		return sse.EncodeDone()
 	}
 	return sse.EncodeData(seg.Data)
+}
+
+func (s *Serializer) serializeResponseTextDelta(seg *ResponseTextDeltaSegment) []byte {
+	m := make(map[string]interface{})
+	for k, v := range seg.Extra {
+		m[k] = v
+	}
+	m["type"] = seg.EventType
+	m["item_id"] = seg.ItemID
+	m["output_index"] = seg.OutputIndex
+	m["content_index"] = seg.ContentIndex
+	m["delta"] = seg.Delta
+	m["sequence_number"] = seg.SequenceNumber
+	if seg.ResponseID != "" {
+		m["response_id"] = seg.ResponseID
+	}
+	if seg.HasLogprobs {
+		m["logprobs"] = seg.Logprobs
+	}
+	data, _ := json.Marshal(m)
+	return sse.EncodeEvent(&sse.Event{
+		Type: seg.EventType,
+		ID:   seg.SSEID,
+		Data: data,
+	})
+}
+
+func (s *Serializer) serializeResponseReasoningDelta(seg *ResponseReasoningDeltaSegment) []byte {
+	m := make(map[string]interface{})
+	for k, v := range seg.Extra {
+		m[k] = v
+	}
+	m["type"] = seg.EventType
+	m["item_id"] = seg.ItemID
+	m["output_index"] = seg.OutputIndex
+	if seg.SummaryIndex != nil {
+		m["summary_index"] = *seg.SummaryIndex
+	}
+	if seg.ContentIndex != nil {
+		m["content_index"] = *seg.ContentIndex
+	}
+	m["delta"] = seg.Delta
+	m["sequence_number"] = seg.SequenceNumber
+	if seg.ResponseID != "" {
+		m["response_id"] = seg.ResponseID
+	}
+	data, _ := json.Marshal(m)
+	return sse.EncodeEvent(&sse.Event{
+		Type: seg.EventType,
+		ID:   seg.SSEID,
+		Data: data,
+	})
+}
+
+func (s *Serializer) serializeResponseToolCallDelta(seg *ResponseToolCallDeltaSegment) []byte {
+	m := make(map[string]interface{})
+	for k, v := range seg.Extra {
+		m[k] = v
+	}
+	m["type"] = seg.EventType
+	m["item_id"] = seg.ItemID
+	m["output_index"] = seg.OutputIndex
+	m["delta"] = seg.Delta
+	m["sequence_number"] = seg.SequenceNumber
+	if seg.CallID != "" {
+		m["call_id"] = seg.CallID
+	}
+	if seg.ResponseID != "" {
+		m["response_id"] = seg.ResponseID
+	}
+	data, _ := json.Marshal(m)
+	return sse.EncodeEvent(&sse.Event{
+		Type: seg.EventType,
+		ID:   seg.SSEID,
+		Data: data,
+	})
+}
+
+func (s *Serializer) serializeResponseControl(seg *ResponseControlSegment) []byte {
+	if seg.IsDone {
+		return sse.EncodeDone()
+	}
+	return sse.EncodeEvent(&sse.Event{
+		Type: seg.EventType,
+		ID:   seg.ID,
+		Data: seg.Data,
+	})
 }

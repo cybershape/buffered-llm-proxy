@@ -18,6 +18,14 @@ const (
 	EventDone
 )
 
+type Protocol int
+
+const (
+	ProtocolAuto Protocol = iota
+	ProtocolChatCompletions
+	ProtocolResponses
+)
+
 type FunctionCallDelta struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
