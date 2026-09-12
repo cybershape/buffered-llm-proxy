@@ -35,9 +35,9 @@ func TestRecordModelMetrics(t *testing.T) {
 	if gpt4o.TPS != 100.0 {
 		t.Errorf("expected Decode TPS 100.0, got %f", gpt4o.TPS)
 	}
-	// Client duration = 6s, tokens = 302 -> ClientTPS = 302 / 6 = ~50.33
-	if gpt4o.ClientTPS < 50.0 || gpt4o.ClientTPS > 51.0 {
-		t.Errorf("expected ClientTPS ~50.33, got %f", gpt4o.ClientTPS)
+	// Client duration = 6s, same decodeTokens=300 -> ClientTPS = 50.0
+	if gpt4o.ClientTPS != 50.0 {
+		t.Errorf("expected ClientTPS 50.0, got %f", gpt4o.ClientTPS)
 	}
 }
 

@@ -275,20 +275,21 @@ func (m *StreamMetrics) ModelSnapshots() map[string]ModelMetricSnapshot {
 			snap.AvgTTFTMs = float64(ttftNs) / float64(reqs) / 1e6
 		}
 
-		// 上游模型推理 Decode TPS：使用生成阶段生成的 decodeTokens 与 upstream 耗时
-		if genNs > 0 {
-			if decTokens > 0 {
-				snap.TPS = float64(decTokens) / (float64(genNs) / 1e9)
-			} else {
-				snap.TPS = float64(tokens) / (float64(genNs) / 1e9)
-			}
-		} else if reqs > 0 && ttftNs > 0 {
-			snap.TPS = float64(tokens) / (float64(ttftNs) / 1e9)
+		tokenNumerator := tokens
+		if decTokens > 0 {
+			tokenNumerator = decTokens
 		}
 
-		// 客户端实际感知输出 TPS
+		// 上游模型推理 Decode TPS：使用生成阶段生成的 decodeTokens 与 upstream 耗时
+		if genNs > 0 {
+			snap.TPS = float64(tokenNumerator) / (float64(genNs) / 1e9)
+		} else if reqs > 0 && ttftNs > 0 {
+			snap.TPS = float64(tokenNumerator) / (float64(ttftNs) / 1e9)
+		}
+
+		// 客户端实际感知输出 TPS，与推理 TPS 使用同一分子
 		if clientNs > 0 {
-			snap.ClientTPS = float64(tokens) / (float64(clientNs) / 1e9)
+			snap.ClientTPS = float64(tokenNumerator) / (float64(clientNs) / 1e9)
 		} else if snap.TPS > 0 {
 			snap.ClientTPS = snap.TPS
 		}

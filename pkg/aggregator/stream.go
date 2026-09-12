@@ -95,18 +95,22 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 	}
 
 	var (
-		firstTokenMu    sync.Mutex
-		firstTokenTime  time.Time
-		upstreamEndTime time.Time
-		totalTokens     int64
-		usageTokens     int64
+		firstTokenMu        sync.Mutex
+		firstTokenTime      time.Time
+		lastTokenTime       time.Time
+		upstreamEndTime     time.Time
+		lastClientTokenTime time.Time
+		totalTokens         int64
+		usageTokens         int64
 	)
 
-	recordFirstToken := func() {
+	recordToken := func() {
+		now := time.Now()
 		firstTokenMu.Lock()
 		if firstTokenTime.IsZero() {
-			firstTokenTime = time.Now()
+			firstTokenTime = now
 		}
+		lastTokenTime = now
 		firstTokenMu.Unlock()
 	}
 
@@ -128,17 +132,24 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 
 		firstTokenMu.Lock()
 		ft := firstTokenTime
-		uEnd := upstreamEndTime
+		uEnd := lastTokenTime
+		if uEnd.IsZero() {
+			uEnd = upstreamEndTime
+		}
 		firstTokenMu.Unlock()
 
 		if uEnd.IsZero() {
 			uEnd = clientEndTime
 		}
+		cEnd := lastClientTokenTime
+		if cEnd.IsZero() {
+			cEnd = clientEndTime
+		}
 
 		if !ft.IsZero() {
 			ttft := ft.Sub(reqStart)
 			upstreamGenDuration := uEnd.Sub(ft)
-			clientGenDuration := clientEndTime.Sub(ft)
+			clientGenDuration := cEnd.Sub(ft)
 			p.metrics.RecordModelMetrics(model, finalTokens, ttft, upstreamGenDuration, clientGenDuration)
 		} else if finalTokens > 0 {
 			ttft := clientEndTime.Sub(reqStart)
@@ -206,29 +217,29 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 				switch v := seg.(type) {
 				case *semantic.ReasoningSegment:
 					p.metrics.IncReasoningFragmentsIn()
-					recordFirstToken()
+					recordToken()
 					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.ResponseReasoningDeltaSegment:
 					p.metrics.IncReasoningFragmentsIn()
-					recordFirstToken()
+					recordToken()
 					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.ContentSegment:
 					p.metrics.IncContentFragmentsIn()
-					recordFirstToken()
+					recordToken()
 					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.ResponseTextDeltaSegment:
 					p.metrics.IncContentFragmentsIn()
-					recordFirstToken()
+					recordToken()
 					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.ToolCallSegment:
 					for range v.Calls {
 						p.metrics.IncToolArgumentFragmentsIn()
-						recordFirstToken()
+						recordToken()
 						atomic.AddInt64(&totalTokens, 1)
 					}
 				case *semantic.ResponseToolCallDeltaSegment:
 					p.metrics.IncToolArgumentFragmentsIn()
-					recordFirstToken()
+					recordToken()
 					atomic.AddInt64(&totalTokens, 1)
 				case *semantic.UsageSegment:
 					if ct := extractCompletionTokens(v.Usage); ct > 0 {
@@ -285,10 +296,13 @@ func (p *StreamPipeline) ProcessStream(ctx context.Context, upstream io.ReadClos
 				switch seg.(type) {
 				case *semantic.ReasoningSegment, *semantic.ResponseReasoningDeltaSegment:
 					p.metrics.IncReasoningEventsOut()
+					lastClientTokenTime = time.Now()
 				case *semantic.ContentSegment, *semantic.ResponseTextDeltaSegment:
 					p.metrics.IncContentEventsOut()
+					lastClientTokenTime = time.Now()
 				case *semantic.ToolCallSegment, *semantic.ResponseToolCallDeltaSegment:
 					p.metrics.IncToolEventsOut()
+					lastClientTokenTime = time.Now()
 				}
 			}
 			if flushed && flusher != nil {

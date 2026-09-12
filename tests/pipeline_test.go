@@ -859,3 +859,39 @@ func TestResponsesStrictBarrierOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestPipelineGenerationDurationExcludesTrailingControlEvents(t *testing.T) {
+	pr, pw := io.Pipe()
+	outBuf := &bytes.Buffer{}
+	m := &metrics.StreamMetrics{}
+	pipeline := aggregator.NewStreamPipeline(aggregator.DefaultBufferConfig(), m)
+	pipeline.SetRequestInfo("gen-end-model", time.Now())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- pipeline.ProcessStream(context.Background(), pr, outBuf)
+	}()
+
+	_, _ = pw.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n"))
+	_, _ = pw.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" World\"}}]}\n\n"))
+	time.Sleep(200 * time.Millisecond)
+	_, _ = pw.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":2}}\n\n"))
+	_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+	_ = pw.Close()
+
+	if err := <-done; err != nil {
+		t.Fatalf("pipeline failed: %v", err)
+	}
+
+	snaps := m.ModelSnapshots()
+	snap, ok := snaps["gen-end-model"]
+	if !ok {
+		t.Fatalf("expected gen-end-model metrics, got %+v", snaps)
+	}
+	if snap.TotalGenerationDurationMs >= 150 {
+		t.Fatalf("generation duration should exclude trailing finish/usage/[DONE], got %.1fms", snap.TotalGenerationDurationMs)
+	}
+	if snap.TotalClientDurationMs >= 150 {
+		t.Fatalf("client duration should exclude trailing control events, got %.1fms", snap.TotalClientDurationMs)
+	}
+}
