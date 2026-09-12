@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1055,4 +1057,484 @@ func TestProxyResponsesStreamTrueAggregated(t *testing.T) {
 	if joinedDelta != "Alpha Beta Gamma" {
 		t.Fatalf("expected 'Alpha Beta Gamma', got %q", joinedDelta)
 	}
+}
+
+func TestMultiUpstream_ListModels(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "model1", "object": "model"},
+				{"id": "model2", "object": "model"},
+			},
+		})
+	}))
+	defer upstream1.Close()
+
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data": []map[string]interface{}{
+				{"id": "model3", "object": "model"},
+			},
+		})
+	}))
+	defer upstream2.Close()
+
+	u1, _ := url.Parse(upstream1.URL)
+	u2, _ := url.Parse(upstream2.URL)
+
+	proxySrv := NewProxyServer(ServerConfig{
+		Upstreams: []UpstreamTarget{
+			{Name: "test", URL: u1},
+			{Name: "prod", URL: u2},
+		},
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &respMap); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	dataList, ok := respMap["data"].([]interface{})
+	if !ok || len(dataList) != 3 {
+		t.Fatalf("expected 3 models in data, got: %+v", respMap)
+	}
+
+	ids := make([]string, len(dataList))
+	for i, d := range dataList {
+		m := d.(map[string]interface{})
+		ids[i] = m["id"].(string)
+	}
+
+	expectedIDs := []string{"test/model1", "test/model2", "prod/model3"}
+	for i, expected := range expectedIDs {
+		if ids[i] != expected {
+			t.Fatalf("expected id[%d] == %s, got %s", i, expected, ids[i])
+		}
+	}
+}
+
+func TestMultiUpstream_Routing_ChatCompletions_Streaming(t *testing.T) {
+	var capturedModel string
+	var upstream1Called bool
+
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream1Called = true
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var reqMap map[string]interface{}
+		_ = json.Unmarshal(bodyBytes, &reqMap)
+		if m, ok := reqMap["model"].(string); ok {
+			capturedModel = m
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		_, _ = w.Write([]byte("data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":100,\"model\":\"model1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream1.Close()
+
+	var upstream2Called bool
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream2Called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream2.Close()
+
+	u1, _ := url.Parse(upstream1.URL)
+	u2, _ := url.Parse(upstream2.URL)
+
+	proxySrv := NewProxyServer(ServerConfig{
+		Upstreams: []UpstreamTarget{
+			{Name: "test", URL: u1},
+			{Name: "prod", URL: u2},
+		},
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	reqBody := `{"model":"test/model1","messages":[{"role":"user","content":"Hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	proxySrv.ServeHTTP(rec, req)
+
+	if !upstream1Called {
+		t.Fatalf("expected upstream 1 to be called")
+	}
+	if upstream2Called {
+		t.Fatalf("upstream 2 should not be called")
+	}
+	if capturedModel != "model1" {
+		t.Fatalf("expected upstream to receive model 'model1', got %q", capturedModel)
+	}
+
+	bodyStr := rec.Body.String()
+	if !strings.Contains(bodyStr, "test/model1") {
+		t.Fatalf("expected downstream response to contain model 'test/model1', got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Hello") {
+		t.Fatalf("expected content 'Hello' in response, got: %s", bodyStr)
+	}
+}
+
+func TestMultiUpstream_Routing_ChatCompletions_NonStreaming(t *testing.T) {
+	var capturedModel string
+
+	upstreamProd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var reqMap map[string]interface{}
+		_ = json.Unmarshal(bodyBytes, &reqMap)
+		if m, ok := reqMap["model"].(string); ok {
+			capturedModel = m
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","model":"modelA","choices":[{"index":0,"message":{"role":"assistant","content":"I am prod"}}]}`))
+	}))
+	defer upstreamProd.Close()
+
+	uProd, _ := url.Parse(upstreamProd.URL)
+	uTest, _ := url.Parse("http://127.0.0.1:9999")
+
+	proxySrv := NewProxyServer(ServerConfig{
+		Upstreams: []UpstreamTarget{
+			{Name: "test", URL: uTest},
+			{Name: "prod", URL: uProd},
+		},
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	reqBody := `{"model":"prod/modelA","messages":[{"role":"user","content":"Hi"}],"stream":false}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	if capturedModel != "modelA" {
+		t.Fatalf("expected upstream to receive 'modelA', got %q", capturedModel)
+	}
+
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &respMap); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if respMap["model"] != "prod/modelA" {
+		t.Fatalf("expected downstream model 'prod/modelA', got %v", respMap["model"])
+	}
+}
+
+func TestMultiUpstream_Routing_Errors(t *testing.T) {
+	u1, _ := url.Parse("http://127.0.0.1:8001")
+	u2, _ := url.Parse("http://127.0.0.1:8002")
+
+	proxySrv := NewProxyServer(ServerConfig{
+		Upstreams: []UpstreamTarget{
+			{Name: "test", URL: u1},
+			{Name: "prod", URL: u2},
+		},
+		BufferConfig: aggregator.DefaultBufferConfig(),
+	})
+
+	// 1. Unknown upstream
+	reqBody := `{"model":"unknown/model1","messages":[{"role":"user","content":"Hi"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	rec := httptest.NewRecorder()
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 on unknown upstream, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "unknown") {
+		t.Fatalf("expected error message to mention unknown upstream, got: %s", rec.Body.String())
+	}
+
+	// 2. Missing prefix when multiple upstreams exist
+	reqBody = `{"model":"model1","messages":[{"role":"user","content":"Hi"}],"stream":true}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	rec = httptest.NewRecorder()
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 on missing prefix, got %d", rec.Code)
+	}
+}
+
+func TestMultiUpstream_APIKey(t *testing.T) {
+	var capturedAuthHeader string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuthHeader = r.Header.Get("Authorization")
+		if capturedAuthHeader != "Bearer secret-test-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data":   []map[string]interface{}{{"id": "model1"}},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":    "cmpl",
+			"model": "model1",
+		})
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		Upstreams: []UpstreamTarget{
+			{Name: "auth-test", URL: u, APIKey: "secret-test-key"},
+		},
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	// 1. Models call
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if capturedAuthHeader != "Bearer secret-test-key" {
+		t.Fatalf("expected 'Bearer secret-test-key', got %q", capturedAuthHeader)
+	}
+
+	// 2. Chat completions call
+	capturedAuthHeader = ""
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"auth-test/model1","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if capturedAuthHeader != "Bearer secret-test-key" {
+		t.Fatalf("expected 'Bearer secret-test-key', got %q", capturedAuthHeader)
+	}
+}
+
+func TestProxyModels_MemoryCacheAndRevalidation(t *testing.T) {
+	var (
+		upstreamCalls atomic.Int32
+		modelNameMu   sync.Mutex
+		currentModel  = "model-v1"
+		upstreamBlock = make(chan struct{})
+		isBlocking    atomic.Bool
+	)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		upstreamCalls.Add(1)
+
+		if isBlocking.Load() {
+			<-upstreamBlock
+		}
+
+		modelNameMu.Lock()
+		m := currentModel
+		modelNameMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   []map[string]interface{}{{"id": m}},
+		})
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	// 1. First request: cache is empty, fetches synchronously
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "model-v1") {
+		t.Fatalf("expected model-v1, got %s", rec.Body.String())
+	}
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", upstreamCalls.Load())
+	}
+
+	// Change upstream response to model-v2
+	modelNameMu.Lock()
+	currentModel = "model-v2"
+	modelNameMu.Unlock()
+
+	// 2. Second request: returns cached data (model-v1) immediately, triggers background update
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "model-v1") {
+		t.Fatalf("expected cached model-v1 returned immediately, got %s", rec.Body.String())
+	}
+
+	// Wait for background update to finish
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if upstreamCalls.Load() == 2 && !proxySrv.modelsUpdating.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for background update, calls=%d, updating=%v", upstreamCalls.Load(), proxySrv.modelsUpdating.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 3. Third request: upstream has finished updating, so it returns model-v2 immediately.
+	// Now enable blocking on upstream to test in-flight suppression!
+	isBlocking.Store(true)
+	modelNameMu.Lock()
+	currentModel = "model-v3"
+	modelNameMu.Unlock()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "model-v2") {
+		t.Fatalf("expected model-v2, got %s", rec.Body.String())
+	}
+
+	// Wait until the 3rd upstream call has started and is blocked
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if upstreamCalls.Load() == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for 3rd upstream call to start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 4. Fourth request arrives WHILE previous update is still running (blocked):
+	// It should return memory data immediately (model-v2) and NOT trigger a new upstream request!
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "model-v2") {
+		t.Fatalf("expected model-v2 from cache, got %s", rec.Body.String())
+	}
+	// Upstream calls MUST still be 3! No new request was sent!
+	if upstreamCalls.Load() != 3 {
+		t.Fatalf("expected upstreamCalls to remain 3, got %d", upstreamCalls.Load())
+	}
+
+	// 5. Unblock upstream and let update finish
+	close(upstreamBlock)
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if !proxySrv.modelsUpdating.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for update to finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 6. Next request: now that update finished, it returns model-v3 and triggers new update
+	isBlocking.Store(false)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	proxySrv.ServeHTTP(rec, req)
+
+	if !strings.Contains(rec.Body.String(), "model-v3") {
+		t.Fatalf("expected model-v3, got %s", rec.Body.String())
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if upstreamCalls.Load() == 4 && !proxySrv.modelsUpdating.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for 4th update to finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestProxyModels_ConcurrentAccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   []map[string]interface{}{{"id": "gpt-4"}},
+		})
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			proxySrv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("expected 200, got %d", rec.Code)
+			}
+		}()
+	}
+	wg.Wait()
 }

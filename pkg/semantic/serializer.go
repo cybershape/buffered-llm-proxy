@@ -7,10 +7,16 @@ import (
 	"buffered-proxy/pkg/sse"
 )
 
-type Serializer struct{}
+type Serializer struct {
+	modelOverride string
+}
 
 func NewSerializer() *Serializer {
 	return &Serializer{}
+}
+
+func (s *Serializer) SetModelOverride(model string) {
+	s.modelOverride = model
 }
 
 func (s *Serializer) SerializeSegment(seg Segment) []byte {
@@ -57,8 +63,12 @@ func (s *Serializer) baseMap(meta CommonMetadata) map[string]interface{} {
 	} else {
 		m["created"] = time.Now().Unix()
 	}
-	if meta.Model != "" {
-		m["model"] = meta.Model
+	model := meta.Model
+	if s.modelOverride != "" {
+		model = s.modelOverride
+	}
+	if model != "" {
+		m["model"] = model
 	}
 	if meta.SystemFingerprint != "" {
 		m["system_fingerprint"] = meta.SystemFingerprint

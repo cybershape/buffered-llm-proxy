@@ -433,3 +433,140 @@ func TestEndToEndResponsesFlow(t *testing.T) {
 		t.Errorf("expected positive Avg TTFT, got %v", modelMetric["avg_ttft_ms"])
 	}
 }
+
+func TestEndToEndMultiUpstream(t *testing.T) {
+	var upstream1ReceivedModel string
+	var upstream2ReceivedModel string
+
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]interface{}{
+					{"id": "model1"},
+				},
+			})
+		case "/v1/chat/completions":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var reqMap map[string]interface{}
+			_ = json.Unmarshal(bodyBytes, &reqMap)
+			upstream1ReceivedModel = reqMap["model"].(string)
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: {\"id\":\"cmpl-1\",\"model\":\"model1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"upstream1-reply\"}}]}\n\n"))
+			flusher.Flush()
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream1.Close()
+
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"object": "list",
+				"data": []map[string]interface{}{
+					{"id": "modelA"},
+				},
+			})
+		case "/v1/chat/completions":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var reqMap map[string]interface{}
+			_ = json.Unmarshal(bodyBytes, &reqMap)
+			upstream2ReceivedModel = reqMap["model"].(string)
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: {\"id\":\"cmpl-2\",\"model\":\"modelA\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"upstream2-reply\"}}]}\n\n"))
+			flusher.Flush()
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream2.Close()
+
+	u1, _ := url.Parse(upstream1.URL)
+	u2, _ := url.Parse(upstream2.URL)
+
+	proxySrv := proxy.NewProxyServer(proxy.ServerConfig{
+		Upstreams: []proxy.UpstreamTarget{
+			{Name: "test", URL: u1},
+			{Name: "prod", URL: u2},
+		},
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		DisableCompression: true,
+	})
+
+	proxyTestServer := httptest.NewServer(proxySrv)
+	defer proxyTestServer.Close()
+
+	client := proxyTestServer.Client()
+
+	// 1. Check /v1/models
+	resp, err := client.Get(proxyTestServer.URL + "/v1/models")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("failed to get models: %v", err)
+	}
+	var modelsResp map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&modelsResp)
+	_ = resp.Body.Close()
+
+	dataList := modelsResp["data"].([]interface{})
+	if len(dataList) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(dataList))
+	}
+	m0 := dataList[0].(map[string]interface{})["id"].(string)
+	m1 := dataList[1].(map[string]interface{})["id"].(string)
+	if m0 != "test/model1" || m1 != "prod/modelA" {
+		t.Fatalf("expected test/model1 and prod/modelA, got %s and %s", m0, m1)
+	}
+
+	// 2. Request test/model1
+	reqBody1 := `{"model":"test/model1","messages":[{"role":"user","content":"hello"}],"stream":true}`
+	resp1, err := client.Post(proxyTestServer.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody1))
+	if err != nil || resp1.StatusCode != http.StatusOK {
+		t.Fatalf("failed post to test/model1: %v", err)
+	}
+	body1Bytes, _ := io.ReadAll(resp1.Body)
+	_ = resp1.Body.Close()
+
+	if upstream1ReceivedModel != "model1" {
+		t.Fatalf("expected upstream 1 to receive 'model1', got %q", upstream1ReceivedModel)
+	}
+	if !strings.Contains(string(body1Bytes), "test/model1") {
+		t.Fatalf("expected downstream response to have model 'test/model1', got: %s", string(body1Bytes))
+	}
+	if !strings.Contains(string(body1Bytes), "upstream1-reply") {
+		t.Fatalf("expected downstream response to have 'upstream1-reply', got: %s", string(body1Bytes))
+	}
+
+	// 3. Request prod/modelA
+	reqBody2 := `{"model":"prod/modelA","messages":[{"role":"user","content":"hello"}],"stream":true}`
+	resp2, err := client.Post(proxyTestServer.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody2))
+	if err != nil || resp2.StatusCode != http.StatusOK {
+		t.Fatalf("failed post to prod/modelA: %v", err)
+	}
+	body2Bytes, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+
+	if upstream2ReceivedModel != "modelA" {
+		t.Fatalf("expected upstream 2 to receive 'modelA', got %q", upstream2ReceivedModel)
+	}
+	if !strings.Contains(string(body2Bytes), "prod/modelA") {
+		t.Fatalf("expected downstream response to have model 'prod/modelA', got: %s", string(body2Bytes))
+	}
+	if !strings.Contains(string(body2Bytes), "upstream2-reply") {
+		t.Fatalf("expected downstream response to have 'upstream2-reply', got: %s", string(body2Bytes))
+	}
+}

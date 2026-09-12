@@ -58,6 +58,12 @@ func (p *StreamPipeline) SetRequestInfo(model string, startTime time.Time) {
 	}
 }
 
+func (p *StreamPipeline) SetModelOverride(model string) {
+	if p.serializer != nil {
+		p.serializer.SetModelOverride(model)
+	}
+}
+
 func (p *StreamPipeline) SetPacketCallback(cb PacketCallback) {
 	p.packetCb = cb
 }

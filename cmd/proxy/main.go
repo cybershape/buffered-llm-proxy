@@ -24,8 +24,18 @@ func main() {
 		log.Fatalf("failed to parse config: %v", err)
 	}
 
+	var upstreams []proxy.UpstreamTarget
+	for _, u := range cfg.Upstreams {
+		upstreams = append(upstreams, proxy.UpstreamTarget{
+			Name:   u.Name,
+			URL:    u.URL,
+			APIKey: u.APIKey,
+		})
+	}
+
 	proxySrv := proxy.NewProxyServer(proxy.ServerConfig{
 		UpstreamURL:        cfg.ParsedUpstream,
+		Upstreams:          upstreams,
 		BufferConfig:       cfg.BufferConfig(),
 		AllowMetricsAPI:    cfg.EnableMetrics,
 		DisableCompression: !cfg.EnableCompression,

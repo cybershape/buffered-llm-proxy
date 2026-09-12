@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,23 +27,37 @@ var dashboardHTMLTemplate string
 
 var dashboardTmpl = template.Must(template.New("dashboard").Parse(dashboardHTMLTemplate))
 
+type UpstreamTarget struct {
+	Name   string   `json:"name"`
+	URL    *url.URL `json:"url"`
+	APIKey string   `json:"api_key,omitempty"`
+}
+
 type EffectiveConfig struct {
-	UpstreamURL        string `json:"upstream_url"`
-	HighWatermarkMB    int64  `json:"high_watermark_mb"`
-	HighWatermarkBytes int64  `json:"high_watermark_bytes"`
-	LowWatermarkMB     int64  `json:"low_watermark_mb"`
-	LowWatermarkBytes  int64  `json:"low_watermark_bytes"`
-	MinCoalesceWaitMs  int64  `json:"min_coalesce_wait_ms"`
-	CompressionEnabled bool   `json:"compression_enabled"`
-	MetricsAPIEnabled  bool   `json:"metrics_api_enabled"`
+	UpstreamURL        string           `json:"upstream_url"`
+	Upstreams          []UpstreamTarget `json:"upstreams,omitempty"`
+	HighWatermarkMB    int64            `json:"high_watermark_mb"`
+	HighWatermarkBytes int64            `json:"high_watermark_bytes"`
+	LowWatermarkMB     int64            `json:"low_watermark_mb"`
+	LowWatermarkBytes  int64            `json:"low_watermark_bytes"`
+	MinCoalesceWaitMs  int64            `json:"min_coalesce_wait_ms"`
+	CompressionEnabled bool             `json:"compression_enabled"`
+	MetricsAPIEnabled  bool             `json:"metrics_api_enabled"`
 }
 
 type ServerConfig struct {
 	UpstreamURL        *url.URL
+	Upstreams          []UpstreamTarget
 	BufferConfig       aggregator.BufferConfig
 	HTTPClient         *http.Client
 	AllowMetricsAPI    bool
 	DisableCompression bool
+}
+
+type cachedModelsResponse struct {
+	statusCode int
+	header     http.Header
+	body       []byte
 }
 
 type ProxyServer struct {
@@ -51,6 +66,12 @@ type ProxyServer struct {
 	totalMetrics *metrics.StreamMetrics
 	monitorHub   *MonitorHub
 	sessionSeq   uint64
+	upstreams    []UpstreamTarget
+	upstreamMap  map[string]*UpstreamTarget
+
+	modelsCache    atomic.Pointer[cachedModelsResponse]
+	modelsUpdating atomic.Bool
+	modelsInitMu   sync.Mutex
 }
 
 func NewProxyServer(cfg ServerConfig) *ProxyServer {
@@ -71,11 +92,39 @@ func NewProxyServer(cfg ServerConfig) *ProxyServer {
 			},
 		}
 	}
+
+	var upstreams []UpstreamTarget
+	upstreamMap := make(map[string]*UpstreamTarget)
+
+	if len(cfg.Upstreams) > 0 {
+		for i := range cfg.Upstreams {
+			u := cfg.Upstreams[i]
+			upstreams = append(upstreams, u)
+			targetPtr := &upstreams[len(upstreams)-1]
+			if u.Name != "" {
+				upstreamMap[u.Name] = targetPtr
+			}
+		}
+		if cfg.UpstreamURL == nil && len(upstreams) > 0 {
+			cfg.UpstreamURL = upstreams[0].URL
+		}
+	} else if cfg.UpstreamURL != nil {
+		target := UpstreamTarget{
+			Name: "",
+			URL:  cfg.UpstreamURL,
+		}
+		upstreams = append(upstreams, target)
+		cfg.Upstreams = upstreams
+		upstreamMap[""] = &upstreams[0]
+	}
+
 	return &ProxyServer{
 		cfg:          cfg,
 		client:       cfg.HTTPClient,
 		totalMetrics: &metrics.StreamMetrics{},
 		monitorHub:   NewMonitorHub(),
+		upstreams:    upstreams,
+		upstreamMap:  upstreamMap,
 	}
 }
 
@@ -89,13 +138,24 @@ func (s *ProxyServer) TotalMetrics() *metrics.StreamMetrics {
 
 func (s *ProxyServer) EffectiveConfig() EffectiveConfig {
 	var upstreamStr string
-	if s.cfg.UpstreamURL != nil {
+	if len(s.upstreams) > 0 {
+		var parts []string
+		for _, u := range s.upstreams {
+			if u.Name != "" {
+				parts = append(parts, fmt.Sprintf("%s=%s", u.Name, u.URL.String()))
+			} else {
+				parts = append(parts, u.URL.String())
+			}
+		}
+		upstreamStr = strings.Join(parts, ", ")
+	} else if s.cfg.UpstreamURL != nil {
 		upstreamStr = s.cfg.UpstreamURL.String()
 	}
 	hw := s.cfg.BufferConfig.HighWatermark
 	lw := s.cfg.BufferConfig.LowWatermark
 	return EffectiveConfig{
 		UpstreamURL:        upstreamStr,
+		Upstreams:          s.upstreams,
 		HighWatermarkMB:    hw / (1024 * 1024),
 		HighWatermarkBytes: hw,
 		LowWatermarkMB:     lw / (1024 * 1024),
@@ -104,6 +164,57 @@ func (s *ProxyServer) EffectiveConfig() EffectiveConfig {
 		CompressionEnabled: !s.cfg.DisableCompression,
 		MetricsAPIEnabled:  s.cfg.AllowMetricsAPI,
 	}
+}
+
+func (s *ProxyServer) resolveUpstream(model string) (*UpstreamTarget, string, error) {
+	if prefix, targetModel, found := strings.Cut(model, "/"); found {
+		if tgt, ok := s.upstreamMap[prefix]; ok {
+			return tgt, targetModel, nil
+		}
+		return nil, "", fmt.Errorf("upstream %q not found for model %q", prefix, model)
+	}
+
+	if len(s.upstreams) == 1 {
+		return &s.upstreams[0], model, nil
+	}
+	if tgt, ok := s.upstreamMap["default"]; ok {
+		return tgt, model, nil
+	}
+	if tgt, ok := s.upstreamMap[""]; ok {
+		return tgt, model, nil
+	}
+	if tgt, ok := s.upstreamMap[model]; ok {
+		return tgt, model, nil
+	}
+
+	return nil, "", fmt.Errorf("model %q does not specify upstream prefix (expected <upstream>/<model>)", model)
+}
+
+func applyAuthHeader(h http.Header, apiKey string) {
+	if apiKey != "" {
+		auth := apiKey
+		if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			auth = "Bearer " + auth
+		}
+		h.Set("Authorization", auth)
+	}
+}
+
+func rewriteModelInBody(bodyBytes []byte, targetModel string) []byte {
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
+		return bodyBytes
+	}
+	targetModelJSON, err := json.Marshal(targetModel)
+	if err != nil {
+		return bodyBytes
+	}
+	rawMap["model"] = targetModelJSON
+	modified, err := json.Marshal(rawMap)
+	if err != nil {
+		return bodyBytes
+	}
+	return modified
 }
 
 func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -288,22 +399,43 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 		})
 	}
 
-	if !payload.Stream {
-		s.transparentProxy(w, r, bodyBytes, sessionID, payload.Model)
+	target, targetModel, err := s.resolveUpstream(payload.Model)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": err.Error(),
+				"type":    "invalid_request_error",
+				"param":   "model",
+				"code":    "model_not_found",
+			},
+		})
 		return
 	}
 
-	targetURL := *s.cfg.UpstreamURL
-	targetURL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
-	targetURL.RawQuery = r.URL.RawQuery
+	upstreamBodyBytes := bodyBytes
+	if targetModel != "" && targetModel != payload.Model {
+		upstreamBodyBytes = rewriteModelInBody(bodyBytes, targetModel)
+	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(bodyBytes))
+	if !payload.Stream {
+		s.transparentProxy(w, r, target, upstreamBodyBytes, sessionID, payload.Model)
+		return
+	}
+
+	destURL := *target.URL
+	destURL.Path = singleJoiningSlash(destURL.Path, r.URL.Path)
+	destURL.RawQuery = r.URL.RawQuery
+
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, destURL.String(), bytes.NewReader(upstreamBodyBytes))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create upstream request: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	copyHeaders(req.Header, r.Header)
+	applyAuthHeader(req.Header, target.APIKey)
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Del("Accept-Encoding")
 
@@ -339,6 +471,7 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 	pipeline := aggregator.NewStreamPipeline(s.cfg.BufferConfig, reqMetrics)
 	pipeline.SetProtocol(proto)
 	pipeline.SetRequestInfo(payload.Model, reqStartTime)
+	pipeline.SetModelOverride(payload.Model)
 
 	pipeline.SetPacketCallback(func(direction string, packetType string, data []byte) {
 		if !s.monitorHub.HasSubscribers(payload.Model) {
@@ -377,30 +510,93 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 }
 
 func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
-	targetURL := *s.cfg.UpstreamURL
-	targetURL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
-	targetURL.RawQuery = r.URL.RawQuery
-
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), nil)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to create upstream request: %v", err), http.StatusInternalServerError)
-		return
+	cached := s.modelsCache.Load()
+	if cached == nil {
+		s.modelsInitMu.Lock()
+		cached = s.modelsCache.Load()
+		if cached == nil {
+			res, err := s.fetchModelsData(r.Context(), r.Header, r.URL.RawQuery)
+			if err != nil {
+				s.modelsInitMu.Unlock()
+				http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+				return
+			}
+			if res.statusCode == http.StatusOK {
+				s.modelsCache.Store(res)
+			}
+			s.modelsInitMu.Unlock()
+			s.writeModelsResponse(w, res)
+			return
+		}
+		s.modelsInitMu.Unlock()
 	}
 
-	copyHeaders(req.Header, r.Header)
+	s.writeModelsResponse(w, cached)
+
+	if s.modelsUpdating.CompareAndSwap(false, true) {
+		headerCopy := r.Header.Clone()
+		rawQuery := r.URL.RawQuery
+		go func() {
+			defer s.modelsUpdating.Store(false)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			newRes, err := s.fetchModelsData(ctx, headerCopy, rawQuery)
+			if err == nil && newRes != nil && newRes.statusCode == http.StatusOK {
+				s.modelsCache.Store(newRes)
+			}
+		}()
+	}
+}
+
+func (s *ProxyServer) writeModelsResponse(w http.ResponseWriter, resp *cachedModelsResponse) {
+	copyHeaders(w.Header(), resp.header)
+	w.Header().Del("Content-Length")
+	w.WriteHeader(resp.statusCode)
+	_, _ = w.Write(resp.body)
+}
+
+func (s *ProxyServer) fetchModelsData(ctx context.Context, origHeader http.Header, rawQuery string) (*cachedModelsResponse, error) {
+	if (len(s.upstreams) == 1 && s.upstreams[0].Name == "") || (len(s.upstreams) == 0 && s.cfg.UpstreamURL != nil) {
+		var target *UpstreamTarget
+		if len(s.upstreams) > 0 {
+			target = &s.upstreams[0]
+		} else {
+			target = &UpstreamTarget{URL: s.cfg.UpstreamURL}
+		}
+		return s.fetchSingleModelData(ctx, origHeader, rawQuery, target)
+	}
+
+	if len(s.upstreams) == 0 {
+		return nil, fmt.Errorf("no upstream configured")
+	}
+
+	return s.fetchMultiModelsData(ctx, origHeader, rawQuery)
+}
+
+func (s *ProxyServer) fetchSingleModelData(ctx context.Context, origHeader http.Header, rawQuery string, target *UpstreamTarget) (*cachedModelsResponse, error) {
+	destURL := *target.URL
+	destURL.Path = singleJoiningSlash(destURL.Path, "/v1/models")
+	destURL.RawQuery = rawQuery
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, destURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upstream request: %w", err)
+	}
+
+	copyHeaders(req.Header, origHeader)
 	req.Header.Set("User-Agent", "grok-shell")
+	applyAuthHeader(req.Header, target.APIKey)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("upstream error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to read upstream response: %v", err), http.StatusBadGateway)
-		return
+		return nil, fmt.Errorf("failed to read upstream response: %w", err)
 	}
 
 	cType := resp.Header.Get("Content-Type")
@@ -415,10 +611,137 @@ func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	copyHeaders(w.Header(), resp.Header)
-	w.Header().Del("Content-Length")
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(bodyBytes)
+	hdr := make(http.Header)
+	copyHeaders(hdr, resp.Header)
+
+	return &cachedModelsResponse{
+		statusCode: resp.StatusCode,
+		header:     hdr,
+		body:       bodyBytes,
+	}, nil
+}
+
+func (s *ProxyServer) fetchMultiModelsData(ctx context.Context, origHeader http.Header, rawQuery string) (*cachedModelsResponse, error) {
+	type fetchResult struct {
+		idx    int
+		models []interface{}
+		err    error
+	}
+
+	results := make([]fetchResult, len(s.upstreams))
+	var wg sync.WaitGroup
+	for i, target := range s.upstreams {
+		wg.Add(1)
+		go func(idx int, tgt UpstreamTarget) {
+			defer wg.Done()
+			mList, err := s.fetchUpstreamModels(ctx, origHeader, rawQuery, tgt)
+			results[idx] = fetchResult{idx: idx, models: mList, err: err}
+		}(i, target)
+	}
+	wg.Wait()
+
+	var allModels []interface{}
+	var lastErr error
+	succeeded := 0
+	for _, res := range results {
+		if res.err != nil {
+			lastErr = res.err
+			continue
+		}
+		succeeded++
+		allModels = append(allModels, res.models...)
+	}
+
+	if succeeded == 0 && lastErr != nil {
+		return nil, fmt.Errorf("upstream error: %w", lastErr)
+	}
+
+	if allModels == nil {
+		allModels = []interface{}{}
+	}
+
+	respMap := map[string]interface{}{
+		"object": "list",
+		"data":   allModels,
+	}
+
+	respBytes, err := json.Marshal(respMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal models: %w", err)
+	}
+
+	hdr := make(http.Header)
+	hdr.Set("Content-Type", "application/json")
+
+	return &cachedModelsResponse{
+		statusCode: http.StatusOK,
+		header:     hdr,
+		body:       respBytes,
+	}, nil
+}
+
+func (s *ProxyServer) fetchUpstreamModels(ctx context.Context, origHeader http.Header, rawQuery string, tgt UpstreamTarget) ([]interface{}, error) {
+	destURL := *tgt.URL
+	destURL.Path = singleJoiningSlash(destURL.Path, "/v1/models")
+	destURL.RawQuery = rawQuery
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, destURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	copyHeaders(req.Header, origHeader)
+	req.Header.Set("User-Agent", "grok-shell")
+	applyAuthHeader(req.Header, tgt.APIKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream %s returned status %d", tgt.Name, resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var root interface{}
+	if err := json.Unmarshal(bodyBytes, &root); err != nil {
+		return nil, err
+	}
+
+	injectContextLength(root)
+
+	var rawList []interface{}
+	switch val := root.(type) {
+	case map[string]interface{}:
+		if data, ok := val["data"].([]interface{}); ok {
+			rawList = data
+		}
+	case []interface{}:
+		rawList = val
+	}
+
+	var resultList []interface{}
+	for _, item := range rawList {
+		if itemMap, ok := item.(map[string]interface{}); ok {
+			if tgt.Name != "" {
+				if idStr, ok := itemMap["id"].(string); ok {
+					itemMap["id"] = tgt.Name + "/" + idStr
+				}
+				if nameStr, ok := itemMap["name"].(string); ok {
+					itemMap["name"] = tgt.Name + "/" + nameStr
+				}
+			}
+			resultList = append(resultList, itemMap)
+		}
+	}
+
+	return resultList, nil
 }
 
 func injectContextLength(v interface{}) bool {
@@ -444,10 +767,21 @@ func injectContextLength(v interface{}) bool {
 	return modified
 }
 
-func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, preloadedBody []byte, sessionID string, model string) {
-	targetURL := *s.cfg.UpstreamURL
-	targetURL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
-	targetURL.RawQuery = r.URL.RawQuery
+func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, target *UpstreamTarget, preloadedBody []byte, sessionID string, model string) {
+	if target == nil {
+		if len(s.upstreams) > 0 {
+			target = &s.upstreams[0]
+		} else if s.cfg.UpstreamURL != nil {
+			target = &UpstreamTarget{URL: s.cfg.UpstreamURL}
+		} else {
+			http.Error(w, "no upstream configured", http.StatusBadGateway)
+			return
+		}
+	}
+
+	destURL := *target.URL
+	destURL.Path = singleJoiningSlash(destURL.Path, r.URL.Path)
+	destURL.RawQuery = r.URL.RawQuery
 
 	var bodyReader io.Reader
 	if preloadedBody != nil {
@@ -457,13 +791,14 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, p
 		defer r.Body.Close()
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bodyReader)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, destURL.String(), bodyReader)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create upstream request: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	copyHeaders(req.Header, r.Header)
+	applyAuthHeader(req.Header, target.APIKey)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -476,6 +811,20 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, p
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to read upstream response: %v", err), http.StatusBadGateway)
 		return
+	}
+
+	if model != "" && strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		var rawMap map[string]json.RawMessage
+		if err := json.Unmarshal(respBytes, &rawMap); err == nil {
+			if _, ok := rawMap["model"]; ok {
+				if modelJSON, err := json.Marshal(model); err == nil {
+					rawMap["model"] = modelJSON
+					if modified, err := json.Marshal(rawMap); err == nil {
+						respBytes = modified
+					}
+				}
+			}
+		}
 	}
 
 	if sessionID != "" && s.monitorHub.HasSubscribers(model) {
@@ -500,6 +849,7 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, p
 	}
 
 	copyHeaders(w.Header(), resp.Header)
+	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBytes)
 }
