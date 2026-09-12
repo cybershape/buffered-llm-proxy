@@ -60,6 +60,40 @@ type cachedModelsResponse struct {
 	body       []byte
 }
 
+type LastRequestRecord struct {
+	Model       string `json:"model"`
+	TimestampMs int64  `json:"timestamp_ms"`
+	DurationMs  int64  `json:"duration_ms"`
+	StatusCode  int    `json:"status_code"`
+	Stream      bool   `json:"stream"`
+	Request     string `json:"request"`
+	Response    string `json:"response"`
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	buf       bytes.Buffer
+	maxRecord int
+}
+
+func (rr *responseRecorder) Write(p []byte) (int, error) {
+	if rr.buf.Len() < rr.maxRecord {
+		avail := rr.maxRecord - rr.buf.Len()
+		if len(p) <= avail {
+			rr.buf.Write(p)
+		} else {
+			rr.buf.Write(p[:avail])
+		}
+	}
+	return rr.ResponseWriter.Write(p)
+}
+
+func (rr *responseRecorder) Flush() {
+	if f, ok := rr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 type ProxyServer struct {
 	cfg          ServerConfig
 	client       *http.Client
@@ -72,6 +106,9 @@ type ProxyServer struct {
 	modelsCache    atomic.Pointer[cachedModelsResponse]
 	modelsUpdating atomic.Bool
 	modelsInitMu   sync.Mutex
+
+	lastReqMu sync.RWMutex
+	lastReqs  map[string]*LastRequestRecord
 }
 
 func NewProxyServer(cfg ServerConfig) *ProxyServer {
@@ -125,6 +162,7 @@ func NewProxyServer(cfg ServerConfig) *ProxyServer {
 		monitorHub:   NewMonitorHub(),
 		upstreams:    upstreams,
 		upstreamMap:  upstreamMap,
+		lastReqs:     make(map[string]*LastRequestRecord),
 	}
 }
 
@@ -225,13 +263,17 @@ func (s *ProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
-	if s.cfg.AllowMetricsAPI && (cleanPath == "/metrics" || cleanPath == "/dashboard" || cleanPath == "/monitor") {
+	if s.cfg.AllowMetricsAPI && (cleanPath == "/metrics" || cleanPath == "/dashboard" || cleanPath == "/monitor" || cleanPath == "/last_req" || cleanPath == "/last-request") {
 		if cleanPath == "/dashboard" {
 			s.handleDashboard(w, r)
 			return
 		}
 		if cleanPath == "/monitor" {
 			s.handleMonitor(w, r)
+			return
+		}
+		if cleanPath == "/last_req" || cleanPath == "/last-request" {
+			s.handleLastReq(w, r)
 			return
 		}
 		s.handleMetrics(w, r)
@@ -361,6 +403,63 @@ func (s *ProxyServer) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *ProxyServer) recordLastReq(rec *LastRequestRecord) {
+	if rec == nil || rec.Model == "" {
+		return
+	}
+	s.lastReqMu.Lock()
+	defer s.lastReqMu.Unlock()
+	if s.lastReqs == nil {
+		s.lastReqs = make(map[string]*LastRequestRecord)
+	}
+	s.lastReqs[rec.Model] = rec
+}
+
+func (s *ProxyServer) getLastReq(model string) *LastRequestRecord {
+	s.lastReqMu.RLock()
+	defer s.lastReqMu.RUnlock()
+	if s.lastReqs == nil {
+		return nil
+	}
+	return s.lastReqs[model]
+}
+
+func (s *ProxyServer) GetLastRequest(model string) *LastRequestRecord {
+	return s.getLastReq(model)
+}
+
+func (s *ProxyServer) handleLastReq(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	model := r.URL.Query().Get("model")
+	w.Header().Set("Content-Type", "application/json")
+
+	if model == "" {
+		s.lastReqMu.RLock()
+		all := make(map[string]*LastRequestRecord, len(s.lastReqs))
+		for k, v := range s.lastReqs {
+			all[k] = v
+		}
+		s.lastReqMu.RUnlock()
+		_ = json.NewEncoder(w).Encode(all)
+		return
+	}
+
+	rec := s.getLastReq(model)
+	if rec == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("no request recorded for model: %s", model),
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(rec)
+}
+
 type streamCheckPayload struct {
 	Stream bool   `json:"stream"`
 	Model  string `json:"model"`
@@ -375,6 +474,7 @@ func (s *ProxyServer) handleResponses(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Request, proto semantic.Protocol) {
+	reqStartTime := time.Now()
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
@@ -401,15 +501,26 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 
 	target, targetModel, err := s.resolveUpstream(payload.Model)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		errResp := map[string]interface{}{
 			"error": map[string]interface{}{
 				"message": err.Error(),
 				"type":    "invalid_request_error",
 				"param":   "model",
 				"code":    "model_not_found",
 			},
+		}
+		errBytes, _ := json.Marshal(errResp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(errBytes)
+		s.recordLastReq(&LastRequestRecord{
+			Model:       payload.Model,
+			TimestampMs: reqStartTime.UnixMilli(),
+			DurationMs:  time.Since(reqStartTime).Milliseconds(),
+			StatusCode:  http.StatusBadRequest,
+			Stream:      payload.Stream,
+			Request:     string(bodyBytes),
+			Response:    string(errBytes),
 		})
 		return
 	}
@@ -420,7 +531,7 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 	}
 
 	if !payload.Stream {
-		s.transparentProxy(w, r, target, upstreamBodyBytes, sessionID, payload.Model)
+		s.transparentProxy(w, r, target, upstreamBodyBytes, sessionID, payload.Model, reqStartTime, bodyBytes)
 		return
 	}
 
@@ -439,10 +550,18 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Del("Accept-Encoding")
 
-	reqStartTime := time.Now()
 	resp, err := s.client.Do(req)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		s.recordLastReq(&LastRequestRecord{
+			Model:       payload.Model,
+			TimestampMs: reqStartTime.UnixMilli(),
+			DurationMs:  time.Since(reqStartTime).Milliseconds(),
+			StatusCode:  http.StatusBadGateway,
+			Stream:      true,
+			Request:     string(bodyBytes),
+			Response:    fmt.Sprintf("upstream error: %v", err),
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -451,7 +570,17 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 	if resp.StatusCode != http.StatusOK || !strings.Contains(cType, "text/event-stream") {
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		respBodyBytes, _ := io.ReadAll(resp.Body)
+		_, _ = w.Write(respBodyBytes)
+		s.recordLastReq(&LastRequestRecord{
+			Model:       payload.Model,
+			TimestampMs: reqStartTime.UnixMilli(),
+			DurationMs:  time.Since(reqStartTime).Milliseconds(),
+			StatusCode:  resp.StatusCode,
+			Stream:      true,
+			Request:     string(bodyBytes),
+			Response:    string(respBodyBytes),
+		})
 		return
 	}
 
@@ -506,7 +635,22 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 		}
 	}()
 
-	_ = pipeline.ProcessStream(r.Context(), resp.Body, w)
+	recWriter := &responseRecorder{
+		ResponseWriter: w,
+		maxRecord:      4 * 1024 * 1024,
+	}
+
+	_ = pipeline.ProcessStream(r.Context(), resp.Body, recWriter)
+
+	s.recordLastReq(&LastRequestRecord{
+		Model:       payload.Model,
+		TimestampMs: reqStartTime.UnixMilli(),
+		DurationMs:  time.Since(reqStartTime).Milliseconds(),
+		StatusCode:  resp.StatusCode,
+		Stream:      true,
+		Request:     string(bodyBytes),
+		Response:    recWriter.buf.String(),
+	})
 }
 
 func (s *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -767,7 +911,7 @@ func injectContextLength(v interface{}) bool {
 	return modified
 }
 
-func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, target *UpstreamTarget, preloadedBody []byte, sessionID string, model string) {
+func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, target *UpstreamTarget, preloadedBody []byte, sessionID string, model string, reqStartTime time.Time, origRequestBody []byte) {
 	if target == nil {
 		if len(s.upstreams) > 0 {
 			target = &s.upstreams[0]
@@ -803,6 +947,19 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, t
 	resp, err := s.client.Do(req)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("upstream error: %v", err), http.StatusBadGateway)
+		reqStr := string(origRequestBody)
+		if reqStr == "" {
+			reqStr = string(preloadedBody)
+		}
+		s.recordLastReq(&LastRequestRecord{
+			Model:       model,
+			TimestampMs: reqStartTime.UnixMilli(),
+			DurationMs:  time.Since(reqStartTime).Milliseconds(),
+			StatusCode:  http.StatusBadGateway,
+			Stream:      false,
+			Request:     reqStr,
+			Response:    fmt.Sprintf("upstream error: %v", err),
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -852,6 +1009,20 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, t
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(respBytes)
+
+	reqStr := string(origRequestBody)
+	if reqStr == "" {
+		reqStr = string(preloadedBody)
+	}
+	s.recordLastReq(&LastRequestRecord{
+		Model:       model,
+		TimestampMs: reqStartTime.UnixMilli(),
+		DurationMs:  time.Since(reqStartTime).Milliseconds(),
+		StatusCode:  resp.StatusCode,
+		Stream:      false,
+		Request:     reqStr,
+		Response:    string(respBytes),
+	})
 }
 
 func extractSSEPayload(data []byte) string {

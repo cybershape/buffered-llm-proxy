@@ -1538,3 +1538,136 @@ func TestProxyModels_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestProxyLastReq_StreamingAndNonStreaming(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var reqMap map[string]interface{}
+		_ = json.Unmarshal(bodyBytes, &reqMap)
+		isStream, _ := reqMap["stream"].(bool)
+		m, _ := reqMap["model"].(string)
+
+		if isStream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: {\"id\":\"1\",\"model\":\"" + m + "\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello stream\"}}]}\n\n"))
+			flusher.Flush()
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":      "cmpl-sync-1",
+				"model":   m,
+				"choices": []map[string]interface{}{{"message": map[string]interface{}{"content": "Hello sync"}}},
+			})
+		}
+	}))
+	defer upstream.Close()
+
+	uURL, _ := url.Parse(upstream.URL)
+	proxySrv := NewProxyServer(ServerConfig{
+		UpstreamURL:        uURL,
+		BufferConfig:       aggregator.DefaultBufferConfig(),
+		AllowMetricsAPI:    true,
+		DisableCompression: true,
+	})
+
+	// 1. Streaming request for model-stream
+	streamReqBody := `{"model":"model-stream","messages":[{"role":"user","content":"ping stream"}],"stream":true}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(streamReqBody))
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	lastStream := proxySrv.GetLastRequest("model-stream")
+	if lastStream == nil {
+		t.Fatalf("expected last request recorded for model-stream")
+	}
+	if lastStream.Model != "model-stream" || !lastStream.Stream || lastStream.StatusCode != 200 {
+		t.Fatalf("unexpected lastStream record: %+v", lastStream)
+	}
+	if !strings.Contains(lastStream.Request, "ping stream") {
+		t.Fatalf("expected ping stream in request, got %s", lastStream.Request)
+	}
+	if !strings.Contains(lastStream.Response, "Hello stream") {
+		t.Fatalf("expected Hello stream in response, got %s", lastStream.Response)
+	}
+
+	// 2. Non-streaming request for model-sync
+	syncReqBody := `{"model":"model-sync","messages":[{"role":"user","content":"ping sync"}],"stream":false}`
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(syncReqBody))
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	lastSync := proxySrv.GetLastRequest("model-sync")
+	if lastSync == nil {
+		t.Fatalf("expected last request recorded for model-sync")
+	}
+	if lastSync.Model != "model-sync" || lastSync.Stream || lastSync.StatusCode != 200 {
+		t.Fatalf("unexpected lastSync record: %+v", lastSync)
+	}
+	if !strings.Contains(lastSync.Request, "ping sync") {
+		t.Fatalf("expected ping sync in request, got %s", lastSync.Request)
+	}
+	if !strings.Contains(lastSync.Response, "Hello sync") {
+		t.Fatalf("expected Hello sync in response, got %s", lastSync.Response)
+	}
+
+	// 3. GET /last_req?model=model-stream
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/last_req?model=model-stream", nil)
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /last_req, got %d", rec.Code)
+	}
+	var apiRecord LastRequestRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiRecord); err != nil {
+		t.Fatalf("failed to unmarshal api record: %v", err)
+	}
+	if apiRecord.Model != "model-stream" || !apiRecord.Stream {
+		t.Fatalf("unexpected api record: %+v", apiRecord)
+	}
+
+	// 4. GET /last_req (all models)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/last_req", nil)
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /last_req, got %d", rec.Code)
+	}
+	var allMap map[string]*LastRequestRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &allMap); err != nil {
+		t.Fatalf("failed to unmarshal allMap: %v", err)
+	}
+	if len(allMap) != 2 || allMap["model-stream"] == nil || allMap["model-sync"] == nil {
+		t.Fatalf("expected both models in allMap, got: %+v", allMap)
+	}
+
+	// 5. GET /last_req?model=nonexistent (404)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/last_req?model=nonexistent", nil)
+	proxySrv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent model, got %d", rec.Code)
+	}
+
+	// 6. Check /dashboard contains Last Req and View
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	proxySrv.ServeHTTP(rec, req)
+	dashBody := rec.Body.String()
+	if !strings.Contains(dashBody, "Last Req") {
+		t.Fatalf("expected dashboard to contain 'Last Req'")
+	}
+	if !strings.Contains(dashBody, "openLastReqModal") {
+		t.Fatalf("expected dashboard to contain 'openLastReqModal'")
+	}
+}

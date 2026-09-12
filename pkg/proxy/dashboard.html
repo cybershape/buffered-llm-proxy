@@ -240,7 +240,7 @@
                                 <th title="Upstream Model Decode Speed">Decode TPS</th>
                                 <th title="Client Perceived Throughput">Client TPS</th>
                                 <th title="Total Tokens Generated">Total Tokens</th>
-                                <th class="has-text-centered" title="Stream real-time upstream and downstream packets">Live Monitor</th>
+                                <th class="has-text-centered" title="View last complete request and response">Last Req</th>
                             </tr>
                         </thead>
                         <tbody id="models-table-body">
@@ -373,56 +373,70 @@
         </div>
     </div>
 
-    <!-- Model Packet Real-Time Monitor Modal -->
-    <div class="modal" id="monitor-modal">
-        <div class="modal-background" onclick="closeMonitorModal()"></div>
+    <!-- Last Request / Response Modal -->
+    <div class="modal" id="last-req-modal">
+        <div class="modal-background" onclick="closeLastReqModal()"></div>
         <div class="modal-card" style="width: 95vw; max-width: 1350px; height: 92vh; max-height: 980px; display: flex; flex-direction: column;">
             <header class="modal-card-head py-3 px-4">
                 <div class="modal-card-title is-size-5 is-flex is-align-items-center mb-0" style="overflow: hidden;">
-                    <span class="mr-2">📡</span>
-                    <span class="has-text-weight-bold">Live Monitor:</span>
-                    <span class="tag is-info font-mono ml-2 is-medium" id="monitor-model-title" style="max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</span>
-                    <span class="tag is-success is-light ml-3" id="monitor-conn-badge">
-                        <span class="status-dot"></span><span id="monitor-conn-status">Connecting...</span>
-                    </span>
+                    <span class="mr-2">📋</span>
+                    <span class="has-text-weight-bold">Last Req:</span>
+                    <span class="tag is-info font-mono ml-2 is-medium" id="last-req-model-title" style="max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</span>
+                    <span class="tag is-success is-light ml-3 font-mono" id="last-req-status-badge">Status: -</span>
+                    <span class="tag is-dark is-light ml-2 font-mono" id="last-req-stream-badge">stream: -</span>
+                    <span class="tag is-light ml-2 font-mono is-size-7" id="last-req-time-badge">-</span>
                 </div>
                 <div class="is-flex is-align-items-center">
-                    <label class="checkbox is-size-7 mr-3 has-text-grey is-flex is-align-items-center" title="Auto-scroll to bottom on new packets">
-                        <input type="checkbox" id="monitor-auto-scroll" checked class="mr-1"> Auto-scroll
-                    </label>
-                    <button class="button is-small is-warning is-light mr-2 font-mono" onclick="clearMonitorData()" title="Clear captured packets">Clear</button>
-                    <button class="delete" aria-label="close" onclick="closeMonitorModal()"></button>
+                    <button class="delete" aria-label="close" onclick="closeLastReqModal()"></button>
                 </div>
             </header>
-            <section class="modal-card-body p-4" id="monitor-modal-body" style="flex: 1; overflow-y: auto;">
-                <!-- Top Info Summary Bar -->
-                <div class="level is-mobile mb-3 px-3 py-2" style="background: var(--bulma-card-background-color, #fff); border: 1px solid var(--bulma-border); border-radius: 6px;">
-                    <div class="level-left">
-                        <div class="level-item is-size-7">
-                            <span class="mr-3">Active Sessions: <strong class="has-text-info font-mono" id="monitor-sess-count">0</strong></span>
-                            <span>Packets: Upstream <strong class="has-text-link font-mono" id="monitor-up-count">0</strong> / Downstream <strong class="has-text-success font-mono" id="monitor-down-count">0</strong></span>
+            <section class="modal-card-body p-4" id="last-req-modal-body" style="flex: 1; overflow-y: auto;">
+                <div id="last-req-loading" class="has-text-centered py-6" style="display: none;">
+                    <p class="is-size-4 mb-2">⏳</p>
+                    <p class="has-text-grey font-mono">Loading last request...</p>
+                </div>
+                <div id="last-req-empty" class="has-text-centered py-6" style="display: none;">
+                    <p class="is-size-3 mb-2">📭</p>
+                    <p class="has-text-weight-semibold is-size-6">No request recorded yet for this model</p>
+                    <p class="has-text-grey is-size-7 mt-1">Make a request to this model first to inspect its payload here.</p>
+                </div>
+                <div id="last-req-content" style="display: none;">
+                    <!-- Request Box -->
+                    <div class="card mb-4 session-card">
+                        <header class="card-header py-2 px-3 is-align-items-center is-justify-content-space-between" style="background: var(--bulma-scheme-main-ter, #f1f3f5);">
+                            <div class="is-flex is-align-items-center">
+                                <span class="tag is-info is-light has-text-weight-bold font-mono mr-2">Request</span>
+                                <span class="is-size-7 has-text-grey font-mono" id="last-req-request-size">0 bytes</span>
+                            </div>
+                            <div>
+                                <button class="button is-small is-ghost font-mono py-0 px-2 is-size-7" onclick="copyLastReqPart('request', this)" title="Copy Request JSON">Copy JSON</button>
+                            </div>
+                        </header>
+                        <div class="card-content p-3">
+                            <pre class="font-mono json-packet-pre mb-0"><code id="last-req-request-pre"></code></pre>
                         </div>
                     </div>
-                    <div class="level-right">
-                        <div class="level-item is-size-7 has-text-grey">
-                            <span>Live streaming · Ephemeral · No server storage</span>
+
+                    <!-- Response Box -->
+                    <div class="card session-card mb-0">
+                        <header class="card-header py-2 px-3 is-align-items-center is-justify-content-space-between" style="background: var(--bulma-scheme-main-ter, #f1f3f5);">
+                            <div class="is-flex is-align-items-center">
+                                <span class="tag is-success is-light has-text-weight-bold font-mono mr-2">Response</span>
+                                <span class="is-size-7 has-text-grey font-mono" id="last-req-response-size">0 bytes</span>
+                            </div>
+                            <div>
+                                <button class="button is-small is-ghost font-mono py-0 px-2 is-size-7" onclick="copyLastReqPart('response', this)" title="Copy Response">Copy Response</button>
+                            </div>
+                        </header>
+                        <div class="card-content p-3">
+                            <pre class="font-mono json-packet-pre mb-0"><code id="last-req-response-pre"></code></pre>
                         </div>
                     </div>
                 </div>
-
-                <!-- Empty State Prompt -->
-                <div id="monitor-empty-state" class="has-text-centered py-6">
-                    <p class="is-size-2 mb-2">⏳</p>
-                    <p class="has-text-weight-semibold is-size-6">Listening for real-time packets on this model...</p>
-                    <p class="has-text-grey is-size-7 mt-1">When clients make requests, upstream requests and coalesced downstream packets will appear here grouped by session in real time.</p>
-                </div>
-
-                <!-- Session Grouping Container -->
-                <div id="monitor-sessions-container"></div>
             </section>
             <footer class="modal-card-foot py-2 px-4 is-justify-content-space-between">
-                <span class="is-size-7 has-text-grey font-mono">Auto-grouped by session (connection) · Formatted JSON · Upstream vs Downstream</span>
-                <button class="button is-small is-dark font-mono" onclick="closeMonitorModal()">Close Monitor</button>
+                <span class="is-size-7 has-text-grey font-mono" id="last-req-footer-summary">Latest cached request &amp; response in memory</span>
+                <button class="button is-small is-dark font-mono" onclick="closeLastReqModal()">Close</button>
             </footer>
         </div>
     </div>
@@ -583,8 +597,8 @@
                             <td class="font-mono"><strong class="has-text-link">${clientTps}</strong>&nbsp;<span class="is-size-7 has-text-grey">tok/s</span></td>
                             <td class="font-mono"><span class="has-text-weight-semibold" title="${totalTokensRaw.toLocaleString()} Tokens">${compactTokens}</span></td>
                             <td class="has-text-centered">
-                                <button class="button is-small is-info is-light font-mono" onclick="openMonitorModal('${escapeHtml(modelName)}')">
-                                    <span>📡 Live Monitor</span>
+                                <button class="button is-small is-info is-light font-mono" onclick="openLastReqModal('${escapeHtml(modelName)}')">
+                                    <span>View</span>
                                 </button>
                             </td>
                         </tr>
@@ -678,12 +692,8 @@
             }, 1000);
         }
 
-        // ==================== Real-Time Packet Monitor Logic ====================
-        let monitorEventSource = null;
-        let currentMonitorModel = null;
-        let activeSessions = {};
-        let totalUpstreamPackets = 0;
-        let totalDownstreamPackets = 0;
+        // ==================== Last Request / Response Modal Logic ====================
+        let currentLastReqData = null;
 
         function escapeHtml(str) {
             if (!str) return '';
@@ -753,10 +763,92 @@
             });
         }
 
-        function copyPacketJson(btn) {
-            const pre = btn.closest('.packet-item')?.querySelector('pre code');
-            if (!pre) return;
-            copyTextToClipboard(pre.textContent).then(() => {
+        async function openLastReqModal(modelName) {
+            currentLastReqData = null;
+            const modal = document.getElementById('last-req-modal');
+            modal.classList.add('is-active');
+
+            document.getElementById('last-req-model-title').textContent = modelName;
+            document.getElementById('last-req-model-title').title = modelName;
+
+            const loadingEl = document.getElementById('last-req-loading');
+            const emptyEl = document.getElementById('last-req-empty');
+            const contentEl = document.getElementById('last-req-content');
+            loadingEl.style.display = 'block';
+            emptyEl.style.display = 'none';
+            contentEl.style.display = 'none';
+
+            document.getElementById('last-req-status-badge').textContent = 'Status: ...';
+            document.getElementById('last-req-status-badge').className = 'tag is-light ml-3 font-mono';
+            document.getElementById('last-req-stream-badge').textContent = 'stream: ...';
+            document.getElementById('last-req-time-badge').textContent = '-';
+
+            try {
+                const res = await fetch('/last_req?model=' + encodeURIComponent(modelName));
+                loadingEl.style.display = 'none';
+                if (!res.ok) {
+                    emptyEl.style.display = 'block';
+                    return;
+                }
+                const data = await res.json();
+                currentLastReqData = data;
+
+                const statusBadge = document.getElementById('last-req-status-badge');
+                statusBadge.textContent = 'Status: ' + (data.status_code || 200);
+                if (data.status_code >= 200 && data.status_code < 300) {
+                    statusBadge.className = 'tag is-success is-light ml-3 font-mono';
+                } else {
+                    statusBadge.className = 'tag is-danger is-light ml-3 font-mono';
+                }
+
+                document.getElementById('last-req-stream-badge').textContent = data.stream ? 'stream: true' : 'stream: false';
+                const durStr = data.duration_ms !== undefined ? data.duration_ms + 'ms' : '';
+                const timeStr = data.timestamp_ms ? formatTimeMs(data.timestamp_ms) : '';
+                document.getElementById('last-req-time-badge').textContent = [timeStr, durStr].filter(Boolean).join(' · ');
+
+                // Request formatting
+                const reqFormatted = formatJsonPayload(data.request);
+                document.getElementById('last-req-request-pre').textContent = reqFormatted;
+                const reqBytes = (new TextEncoder().encode(data.request || '')).length;
+                document.getElementById('last-req-request-size').textContent = reqBytes.toLocaleString() + ' bytes';
+
+                // Response formatting
+                let respFormatted = '';
+                if (data.stream) {
+                    respFormatted = data.response || '';
+                } else {
+                    respFormatted = formatJsonPayload(data.response);
+                }
+                document.getElementById('last-req-response-pre').textContent = respFormatted;
+                const respBytes = (new TextEncoder().encode(data.response || '')).length;
+                document.getElementById('last-req-response-size').textContent = respBytes.toLocaleString() + ' bytes';
+
+                document.getElementById('last-req-footer-summary').textContent =
+                    `Model: ${data.model} · Duration: ${data.duration_ms || 0}ms · Total Size: ${(reqBytes + respBytes).toLocaleString()} bytes`;
+
+                contentEl.style.display = 'block';
+            } catch (err) {
+                loadingEl.style.display = 'none';
+                emptyEl.style.display = 'block';
+                console.error('Failed to fetch last request:', err);
+            }
+        }
+
+        function closeLastReqModal() {
+            currentLastReqData = null;
+            const modal = document.getElementById('last-req-modal');
+            if (modal) modal.classList.remove('is-active');
+        }
+
+        function copyLastReqPart(part, btn) {
+            if (!currentLastReqData) return;
+            let text = '';
+            if (part === 'request') {
+                text = formatJsonPayload(currentLastReqData.request);
+            } else {
+                text = currentLastReqData.stream ? (currentLastReqData.response || '') : formatJsonPayload(currentLastReqData.response);
+            }
+            copyTextToClipboard(text).then(() => {
                 const orig = btn.innerHTML;
                 btn.innerHTML = 'Copied ✔';
                 btn.classList.add('has-text-success');
@@ -776,218 +868,9 @@
             });
         }
 
-        function toggleSessionCollapse(sessId) {
-            const sess = activeSessions[sessId];
-            if (!sess) return;
-            const content = sess.contentEl;
-            const toggleBtn = sess.toggleBtn;
-            if (content.style.display === 'none') {
-                content.style.display = 'block';
-                toggleBtn.textContent = 'Collapse';
-            } else {
-                content.style.display = 'none';
-                toggleBtn.textContent = 'Expand';
-            }
-        }
-
-        function clearMonitorData() {
-            activeSessions = {};
-            totalUpstreamPackets = 0;
-            totalDownstreamPackets = 0;
-            const container = document.getElementById('monitor-sessions-container');
-            if (container) container.innerHTML = '';
-            const sessEl = document.getElementById('monitor-sess-count');
-            if (sessEl) sessEl.textContent = '0';
-            const upEl = document.getElementById('monitor-up-count');
-            if (upEl) upEl.textContent = '0';
-            const downEl = document.getElementById('monitor-down-count');
-            if (downEl) downEl.textContent = '0';
-            const emptyEl = document.getElementById('monitor-empty-state');
-            if (emptyEl) emptyEl.style.display = 'block';
-        }
-
-        function openMonitorModal(modelName) {
-            closeMonitorModal();
-
-            currentMonitorModel = modelName;
-            document.getElementById('monitor-model-title').textContent = modelName;
-            document.getElementById('monitor-model-title').title = modelName;
-
-            const connBadge = document.getElementById('monitor-conn-badge');
-            const connStatus = document.getElementById('monitor-conn-status');
-            connBadge.className = 'tag is-warning is-light ml-3';
-            connStatus.textContent = 'Connecting...';
-
-            clearMonitorData();
-
-            const modal = document.getElementById('monitor-modal');
-            modal.classList.add('is-active');
-
-            const sseUrl = '/monitor?model=' + encodeURIComponent(modelName);
-            try {
-                monitorEventSource = new EventSource(sseUrl);
-
-                monitorEventSource.onopen = () => {
-                    connBadge.className = 'tag is-success is-light ml-3';
-                    connStatus.textContent = 'Connected (Listening)';
-                };
-
-                monitorEventSource.onmessage = (e) => {
-                    if (!e.data) return;
-                    try {
-                        const ev = JSON.parse(e.data);
-                        handleMonitorPacket(ev);
-                    } catch (err) {
-                        console.error('Failed to parse monitor event JSON:', err, e.data);
-                    }
-                };
-
-                monitorEventSource.onerror = () => {
-                    connBadge.className = 'tag is-danger is-light ml-3';
-                    connStatus.textContent = 'Disconnected (Reconnecting...)';
-                };
-            } catch (err) {
-                console.error('Failed to init EventSource:', err);
-                connBadge.className = 'tag is-danger is-light ml-3';
-                connStatus.textContent = 'Connection failed: ' + err.message;
-            }
-        }
-
-        function closeMonitorModal() {
-            if (monitorEventSource) {
-                monitorEventSource.close();
-                monitorEventSource = null;
-            }
-            clearMonitorData();
-            currentMonitorModel = null;
-            const modal = document.getElementById('monitor-modal');
-            if (modal) modal.classList.remove('is-active');
-        }
-
-        function handleMonitorPacket(ev) {
-            const container = document.getElementById('monitor-sessions-container');
-            const emptyState = document.getElementById('monitor-empty-state');
-            if (emptyState) emptyState.style.display = 'none';
-
-            const sessId = ev.session_id || 'unknown_session';
-            let sess = activeSessions[sessId];
-
-            if (!sess) {
-                const card = document.createElement('div');
-                card.className = 'card session-card';
-                card.id = 'sess-card-' + sessId;
-
-                const header = document.createElement('header');
-                header.className = 'card-header py-2 px-3 is-align-items-center is-justify-content-space-between';
-                header.style.background = 'var(--bulma-scheme-main-ter, #f1f3f5)';
-
-                header.innerHTML = `
-                    <div class="is-flex is-align-items-center" style="overflow: hidden;">
-                        <span class="tag is-dark font-mono has-text-weight-bold mr-2" title="Session ID">${escapeHtml(sessId)}</span>
-                        <span class="tag is-success is-light mr-2 font-mono sess-status-tag">
-                            <span class="status-dot"></span><span class="status-label">Active</span>
-                        </span>
-                        <span class="tag is-info is-light mr-1 font-mono sess-up-badge">⬆ 0</span>
-                        <span class="tag is-success is-light mr-3 font-mono sess-down-badge">⬇ 0</span>
-                        <span class="is-size-7 has-text-grey font-mono">${formatTimeMs(ev.timestamp_ms)}</span>
-                    </div>
-                    <div>
-                        <button class="button is-small font-mono sess-toggle-btn" onclick="toggleSessionCollapse('${escapeHtml(sessId)}')">Collapse</button>
-                    </div>
-                `;
-
-                const content = document.createElement('div');
-                content.className = 'card-content p-3';
-
-                card.appendChild(header);
-                card.appendChild(content);
-                container.appendChild(card);
-
-                sess = {
-                    cardEl: card,
-                    contentEl: content,
-                    statusTag: header.querySelector('.sess-status-tag'),
-                    statusLabel: header.querySelector('.status-label'),
-                    upBadge: header.querySelector('.sess-up-badge'),
-                    downBadge: header.querySelector('.sess-down-badge'),
-                    toggleBtn: header.querySelector('.sess-toggle-btn'),
-                    upCount: 0,
-                    downCount: 0,
-                };
-                activeSessions[sessId] = sess;
-
-                document.getElementById('monitor-sess-count').textContent = Object.keys(activeSessions).length;
-            }
-
-            if (ev.direction === 'upstream') {
-                sess.upCount++;
-                totalUpstreamPackets++;
-                sess.upBadge.textContent = '⬆ ' + sess.upCount;
-                document.getElementById('monitor-up-count').textContent = totalUpstreamPackets;
-            } else {
-                sess.downCount++;
-                totalDownstreamPackets++;
-                sess.downBadge.textContent = '⬇ ' + sess.downCount;
-                document.getElementById('monitor-down-count').textContent = totalDownstreamPackets;
-            }
-
-            if (ev.packet_type === 'session_end') {
-                sess.statusTag.className = 'tag is-dark is-light mr-2 font-mono';
-                sess.statusLabel.textContent = 'Completed';
-                const dot = sess.statusTag.querySelector('.status-dot');
-                if (dot) dot.remove();
-            }
-
-            const item = document.createElement('div');
-            item.className = 'packet-item';
-
-            let dirBadge = '';
-            if (ev.direction === 'upstream') {
-                dirBadge = '<span class="tag is-info is-light has-text-weight-bold font-mono mr-2">⬆ Upstream</span><span class="tag is-dark is-light font-mono mr-2">Client Request</span>';
-            } else {
-                if (ev.packet_type === 'response') {
-                    dirBadge = '<span class="tag is-success is-light has-text-weight-bold font-mono mr-2">⬇ Downstream</span><span class="tag is-primary is-light font-mono mr-2">Complete Response</span>';
-                } else if (ev.packet_type === 'session_end') {
-                    dirBadge = '<span class="tag is-dark is-light has-text-weight-bold font-mono mr-2">✔ Done</span><span class="tag is-light font-mono mr-2">Session Ended</span>';
-                } else {
-                    dirBadge = '<span class="tag is-success is-light has-text-weight-bold font-mono mr-2">⬇ Downstream</span><span class="tag is-success is-light font-mono mr-2">Coalesced Chunk</span>';
-                }
-            }
-
-            const formatted = formatJsonPayload(ev.payload);
-            const byteSize = (new TextEncoder().encode(ev.payload || '')).length;
-
-            item.innerHTML = `
-                <div class="is-flex is-align-items-center is-justify-content-space-between mb-1">
-                    <div class="is-flex is-align-items-center">
-                        ${dirBadge}
-                        <span class="is-size-7 has-text-grey font-mono mr-2">${formatTimeMs(ev.timestamp_ms)}</span>
-                        <span class="is-size-7 has-text-grey font-mono">${byteSize.toLocaleString()} bytes</span>
-                    </div>
-                    <div>
-                        <button class="button is-small is-ghost font-mono py-0 px-2 is-size-7" onclick="copyPacketJson(this)" title="Copy packet JSON">Copy JSON</button>
-                    </div>
-                </div>
-                <pre class="font-mono json-packet-pre"><code>${escapeHtml(formatted)}</code></pre>
-            `;
-
-            sess.contentEl.appendChild(item);
-
-            const autoScroll = document.getElementById('monitor-auto-scroll');
-            if (autoScroll && autoScroll.checked) {
-                const body = document.getElementById('monitor-modal-body');
-                if (body) {
-                    body.scrollTop = body.scrollHeight;
-                }
-            }
-        }
-
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
-                const modal = document.getElementById('monitor-modal');
-                if (modal && modal.classList.contains('is-active')) {
-                    closeMonitorModal();
-                }
+                closeLastReqModal();
             }
         });
 
