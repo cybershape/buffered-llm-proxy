@@ -184,10 +184,10 @@ func TestEndToEndFullFlow(t *testing.T) {
 	}
 	bodyDash, _ := io.ReadAll(respDashboard.Body)
 	_ = respDashboard.Body.Close()
-	if !strings.Contains(string(bodyDash), "生效配置") {
+	if !strings.Contains(string(bodyDash), "Effective Configurations") {
 		t.Fatalf("missing effective configs in dashboard")
 	}
-	if !strings.Contains(string(bodyDash), "模型性能指标") {
+	if !strings.Contains(string(bodyDash), "Model Performance") {
 		t.Fatalf("missing model performance in dashboard")
 	}
 }

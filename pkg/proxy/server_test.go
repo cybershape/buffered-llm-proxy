@@ -603,13 +603,13 @@ func TestProxyDashboardEndpoint(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "Buffered Proxy 监控仪表盘") {
+	if !strings.Contains(body, "Buffered Proxy Dashboard") {
 		t.Errorf("missing dashboard title in html")
 	}
-	if !strings.Contains(body, "生效配置 (Effective Configurations)") {
+	if !strings.Contains(body, "Effective Configurations") {
 		t.Errorf("missing effective configs section in html")
 	}
-	if !strings.Contains(body, "模型性能指标 (Model Performance: TTFT &amp; TPS)") && !strings.Contains(body, "模型性能指标") {
+	if !strings.Contains(body, "Model Performance (TTFT &amp; TPS)") && !strings.Contains(body, "Model Performance") {
 		t.Errorf("missing model performance section in html")
 	}
 	if !strings.Contains(body, "http://127.0.0.1:9999") {

@@ -395,7 +395,7 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 			Direction:   DirectionUpstream,
 			PacketType:  "request",
 			Payload:     string(bodyBytes),
-			Summary:     "客户端请求包",
+			Summary:     "Client Request",
 		})
 	}
 
@@ -488,7 +488,7 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 			Direction:   DirectionDownstream,
 			PacketType:  "downstream_chunk",
 			Payload:     cleanPayload,
-			Summary:     "下游合并数据包",
+			Summary:     "Downstream Coalesced Packet",
 		})
 	})
 
@@ -501,7 +501,7 @@ func (s *ProxyServer) handleStreamingEndpoint(w http.ResponseWriter, r *http.Req
 				Direction:   DirectionDownstream,
 				PacketType:  "session_end",
 				Payload:     `{"status":"completed"}`,
-				Summary:     "连接已结束",
+				Summary:     "Connection Closed",
 			})
 		}
 	}()
@@ -835,7 +835,7 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, t
 			Direction:   DirectionDownstream,
 			PacketType:  "response",
 			Payload:     string(respBytes),
-			Summary:     "非流式响应包",
+			Summary:     "Non-Streaming Response",
 		})
 		s.monitorHub.Broadcast(MonitorPacketEvent{
 			SessionID:   sessionID,
@@ -844,7 +844,7 @@ func (s *ProxyServer) transparentProxy(w http.ResponseWriter, r *http.Request, t
 			Direction:   DirectionDownstream,
 			PacketType:  "session_end",
 			Payload:     `{"status":"completed"}`,
-			Summary:     "连接已结束",
+			Summary:     "Connection Closed",
 		})
 	}
 
